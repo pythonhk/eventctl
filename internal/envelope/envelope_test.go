@@ -38,7 +38,7 @@ func TestRegistrationRoundTripAndExpectedContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := Expected{EventID: "summer-data-2026", EventEpoch: "1", RepositoryID: "123456789", ActorID: "42", ConfigDigest: testDigest, Now: registrationParams().IssuedAt.Add(time.Minute)}
-	verified, err := VerifyRegistration(raw, expected)
+	verified, err := VerifyRegistration(raw, expected, 15*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestRegistrationRoundTripAndExpectedContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected.ActorID = "43"
-	if _, err := VerifyRegistration(raw, expected); err == nil {
+	if _, err := VerifyRegistration(raw, expected, 15*time.Minute); err == nil {
 		t.Fatal("accepted wrong trusted actor")
 	}
 }
@@ -62,7 +62,7 @@ func TestRegistrationMutationAndUnknownFieldFail(t *testing.T) {
 		t.Fatal(err)
 	}
 	mutated := bytes.Replace(raw, []byte(`"actor_id":"42"`), []byte(`"actor_id":"43"`), 1)
-	if _, err := VerifyRegistration(mutated, Expected{}); err == nil {
+	if _, err := VerifyRegistration(mutated, Expected{}, 15*time.Minute); err == nil {
 		t.Fatal("accepted mutated actor")
 	}
 	var object map[string]any
@@ -71,7 +71,7 @@ func TestRegistrationMutationAndUnknownFieldFail(t *testing.T) {
 	}
 	object["unknown"] = true
 	withUnknown, _ := json.Marshal(object)
-	if _, err := VerifyRegistration(withUnknown, Expected{}); err == nil {
+	if _, err := VerifyRegistration(withUnknown, Expected{}, 15*time.Minute); err == nil {
 		t.Fatal("accepted unknown field")
 	}
 }
@@ -118,13 +118,52 @@ func TestRegistrationValidityUsesTrustedSourceTime(t *testing.T) {
 	}
 	// A controller may process this durable source much later; the verifier's
 	// Now is the immutable GitHub source creation time, not processing time.
-	if _, err := VerifyRegistration(raw, Expected{Now: params.IssuedAt.Add(10 * time.Minute)}); err != nil {
+	if _, err := VerifyRegistration(raw, Expected{Now: params.IssuedAt.Add(10 * time.Minute)}, 30*time.Minute); err != nil {
 		t.Fatalf("valid delayed source was rejected: %v", err)
 	}
-	if _, err := VerifyRegistration(raw, Expected{Now: params.IssuedAt.Add(-time.Second)}); err == nil {
+	if _, err := VerifyRegistration(raw, Expected{Now: params.IssuedAt.Add(-time.Second)}, 30*time.Minute); err == nil {
 		t.Fatal("pre-issued source time was accepted")
 	}
-	if _, err := VerifyRegistration(raw, Expected{Now: params.ExpiresAt.Add(time.Second)}); err == nil {
+	if _, err := VerifyRegistration(raw, Expected{Now: params.ExpiresAt.Add(time.Second)}, 30*time.Minute); err == nil {
 		t.Fatal("post-expiry source time was accepted")
+	}
+}
+
+func TestRegistrationVerificationEnforcesConfiguredTTL(t *testing.T) {
+	t.Parallel()
+	pair := testPair(t, 18)
+	params := registrationParams()
+	configuredTTL := 15 * time.Minute
+
+	params.ExpiresAt = params.IssuedAt.Add(configuredTTL)
+	exact, err := NewRegistration(params, pair.Private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyRegistration(exact, Expected{Now: params.IssuedAt.Add(time.Minute)}, configuredTTL); err != nil {
+		t.Fatalf("exact configured registration TTL rejected: %v", err)
+	}
+
+	params.ExpiresAt = params.IssuedAt.Add(configuredTTL + time.Second)
+	over, err := NewRegistration(params, pair.Private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyRegistration(over, Expected{Now: params.IssuedAt.Add(time.Minute)}, configuredTTL); err == nil {
+		t.Fatal("registration above the signed config TTL was accepted")
+	}
+}
+
+func TestValidateWindowPreservesGenericTwentyFourHourBoundary(t *testing.T) {
+	t.Parallel()
+	issued := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	format := func(value time.Time) string {
+		return value.UTC().Format("2006-01-02T15:04:05Z")
+	}
+	if err := ValidateWindow(format(issued), format(issued.Add(24*time.Hour)), issued.Add(time.Minute)); err != nil {
+		t.Fatalf("exact 24-hour generic window rejected: %v", err)
+	}
+	if err := ValidateWindow(format(issued), format(issued.Add(24*time.Hour+time.Second)), issued.Add(time.Minute)); err == nil {
+		t.Fatal("generic window above 24 hours was accepted")
 	}
 }

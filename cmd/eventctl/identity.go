@@ -64,11 +64,12 @@ func identityRegister(args []string, stderr io.Writer) (any, error) {
 		return nil, verificationError("decrypt participant key", err)
 	}
 	issued := time.Now().UTC().Truncate(time.Second)
-	raw, err := envelope.NewRegistration(envelope.RegistrationParams{EventID: event.EventID, EventEpoch: event.EventEpoch, OperationID: *requestID, ActorID: *actorID, KeyEpoch: *keyEpoch, BaseRepository: event.BaseRepository, ConfigDigest: digest, TermsDigest: event.Registration.TermsDigest, IssuedAt: issued, ExpiresAt: issued.Add(time.Duration(event.Registration.RequestTTLSeconds) * time.Second)}, pair.Private)
+	requestTTL := time.Duration(event.Registration.RequestTTLSeconds) * time.Second
+	raw, err := envelope.NewRegistration(envelope.RegistrationParams{EventID: event.EventID, EventEpoch: event.EventEpoch, OperationID: *requestID, ActorID: *actorID, KeyEpoch: *keyEpoch, BaseRepository: event.BaseRepository, ConfigDigest: digest, TermsDigest: event.Registration.TermsDigest, IssuedAt: issued, ExpiresAt: issued.Add(requestTTL)}, pair.Private)
 	if err != nil {
 		return nil, invalidError("create registration", err)
 	}
-	verified, err := envelope.VerifyRegistration(raw, envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ActorID: *actorID, ConfigDigest: digest, Now: issued})
+	verified, err := envelope.VerifyRegistration(raw, envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ActorID: *actorID, ConfigDigest: digest, Now: issued}, requestTTL)
 	if err != nil {
 		return nil, verificationError("self-verify registration", err)
 	}
@@ -109,7 +110,8 @@ func identityVerify(args []string) (any, error) {
 	if err != nil {
 		return nil, ioError("read registration request", err)
 	}
-	verified, err := envelope.VerifyRegistration(raw, envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ActorID: *actorID, ConfigDigest: digest, Now: sourceTime})
+	requestTTL := time.Duration(event.Registration.RequestTTLSeconds) * time.Second
+	verified, err := envelope.VerifyRegistration(raw, envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ActorID: *actorID, ConfigDigest: digest, Now: sourceTime}, requestTTL)
 	if err != nil {
 		return nil, verificationError("verify registration", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"filippo.io/age"
 )
@@ -143,5 +144,6 @@ func fuzzLimits() Limits {
 		MaxPlaintextBytes:  48 * 1024,
 		MaxRecipients:      4,
 		MaxTotalFileBytes:  48 * 1024,
+		MaxValidity:        24 * time.Hour,
 	}
 }

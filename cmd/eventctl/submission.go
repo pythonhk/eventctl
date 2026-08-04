@@ -249,12 +249,13 @@ func submissionPrepare(args []string, stderr io.Writer) (any, error) {
 		return nil, verificationError("pack record does not match trusted actor/config", nil)
 	}
 	issued := time.Now().UTC().Truncate(time.Second)
+	envelopeTTL := time.Duration(event.Submissions.EnvelopeTTLSeconds) * time.Second
 	reference := envelope.BundleReference{Path: "submission.eventctl", SizeBytes: record.Bundle.SizeBytes, SHA256: record.Bundle.SHA256, EnvelopeSHA256: record.Bundle.EnvelopeSHA256, CiphertextSize: record.Bundle.CiphertextSize, CiphertextSHA256: record.Bundle.CiphertextSHA256, Format: envelope.SubmissionBundleFormat}
-	raw, err := envelope.NewSubmission(envelope.SubmissionParams{EventID: event.EventID, EventEpoch: event.EventEpoch, RequestID: record.RequestID, AttemptID: record.AttemptID, ActorID: *actorID, KeyEpoch: keyEpoch, TeamID: record.TeamID, TeamProposalDigest: record.TeamProposalDigest, Metadata: metadata, ConfigDigest: digest, IssuedAt: issued, ExpiresAt: issued.Add(time.Duration(event.Submissions.EnvelopeTTLSeconds) * time.Second), Bundle: reference}, pair.Private)
+	raw, err := envelope.NewSubmission(envelope.SubmissionParams{EventID: event.EventID, EventEpoch: event.EventEpoch, RequestID: record.RequestID, AttemptID: record.AttemptID, ActorID: *actorID, KeyEpoch: keyEpoch, TeamID: record.TeamID, TeamProposalDigest: record.TeamProposalDigest, Metadata: metadata, ConfigDigest: digest, IssuedAt: issued, ExpiresAt: issued.Add(envelopeTTL), Bundle: reference}, pair.Private)
 	if err != nil {
 		return nil, invalidError("create submission request", err)
 	}
-	verified, err := envelope.VerifySubmission(raw, envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ActorID: *actorID, ConfigDigest: digest, Now: issued}, registry)
+	verified, err := envelope.VerifySubmission(raw, envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ActorID: *actorID, ConfigDigest: digest, Now: issued}, envelopeTTL, registry)
 	if err != nil {
 		return nil, verificationError("self-verify submission request", err)
 	}
@@ -299,7 +300,8 @@ func submissionVerifyRequest(args []string) (any, error) {
 	if err != nil {
 		return nil, ioError("read submission request", err)
 	}
-	verified, err := envelope.VerifySubmission(requestRaw, envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ActorID: *actorID, ConfigDigest: digest, Now: sourceTime}, registry)
+	envelopeTTL := time.Duration(event.Submissions.EnvelopeTTLSeconds) * time.Second
+	verified, err := envelope.VerifySubmission(requestRaw, envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ActorID: *actorID, ConfigDigest: digest, Now: sourceTime}, envelopeTTL, registry)
 	if err != nil {
 		return nil, verificationError("verify submission request", err)
 	}
@@ -412,7 +414,7 @@ func submissionDecryptVerify(args []string, stderr io.Writer) (any, error) {
 	verifiedRequest, err := envelope.VerifySubmission(requestRaw, envelope.Expected{
 		EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID,
 		ActorID: *expectActorID, ConfigDigest: digest, Now: time.Time{},
-	}, registry)
+	}, time.Duration(event.Submissions.EnvelopeTTLSeconds)*time.Second, registry)
 	if err != nil {
 		return nil, verificationError("verify signed submission request", err)
 	}
@@ -522,7 +524,7 @@ func submissionDecryptVerify(args []string, stderr io.Writer) (any, error) {
 }
 
 func bundleLimits(event config.Event) bundle.Limits {
-	return bundle.Limits{MaxCiphertextBytes: event.Submissions.MaximumCiphertextBytes, MaxEnvelopeBytes: 256 * 1024, MaxPlaintextBytes: event.Submissions.MaximumPlaintextBytes, MaxFileBytes: event.Submissions.MaximumFileBytes, MaxFiles: uint32(event.Submissions.MaximumPlaintextFiles), MaxManifestBytes: 4 * 1024 * 1024, MaxRecipients: uint32(len(event.Submissions.Encryption.Recipients)), MaxTotalFileBytes: event.Submissions.MaximumPlaintextBytes}
+	return bundle.Limits{MaxCiphertextBytes: event.Submissions.MaximumCiphertextBytes, MaxEnvelopeBytes: 256 * 1024, MaxPlaintextBytes: event.Submissions.MaximumPlaintextBytes, MaxFileBytes: event.Submissions.MaximumFileBytes, MaxFiles: uint32(event.Submissions.MaximumPlaintextFiles), MaxManifestBytes: 4 * 1024 * 1024, MaxRecipients: uint32(len(event.Submissions.Encryption.Recipients)), MaxTotalFileBytes: event.Submissions.MaximumPlaintextBytes, MaxValidity: time.Duration(event.Submissions.EnvelopeTTLSeconds) * time.Second}
 }
 func packRecordFrom(packed bundle.Packed, created time.Time) envelope.PackRecord {
 	e := packed.Envelope

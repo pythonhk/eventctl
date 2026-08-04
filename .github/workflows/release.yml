@@ -274,6 +274,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
+      attestations: read
       contents: read
     steps:
       - name: Check out verification scripts
@@ -328,6 +329,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     permissions:
+      attestations: read
       contents: read
     steps:
       - name: Check out verification scripts

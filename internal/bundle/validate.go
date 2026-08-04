@@ -40,7 +40,7 @@ func unmarshalCanonical(data []byte, value any) error {
 	return nil
 }
 
-func validateBinding(binding Binding) error {
+func validateBinding(binding Binding, maximumValidity time.Duration) error {
 	if !protocolenvelope.IsEventID(binding.EventID) {
 		return fmt.Errorf("%w: event_id is invalid", ErrInvalidFormat)
 	}
@@ -71,7 +71,7 @@ func validateBinding(binding Binding) error {
 	if err := identity.ValidateDecimal(binding.RecipientEpoch, "recipient_epoch"); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidFormat, err)
 	}
-	if err := protocolenvelope.ValidateWindow(binding.IssuedAt, binding.ExpiresAt, time.Time{}); err != nil {
+	if err := protocolenvelope.ValidateWindowWithin(binding.IssuedAt, binding.ExpiresAt, time.Time{}, maximumValidity); err != nil {
 		return fmt.Errorf("%w: invalid validity window: %v", ErrInvalidFormat, err)
 	}
 	return nil
@@ -93,7 +93,7 @@ func validateManifest(manifest Manifest, limits Limits) error {
 	if manifest.Kind != ManifestKind || manifest.Protocol != Protocol || manifest.ProtocolVersion != ProtocolVersion {
 		return fmt.Errorf("%w: unsupported manifest discriminator", ErrInvalidFormat)
 	}
-	if err := validateBinding(bindingFromManifest(manifest)); err != nil {
+	if err := validateBinding(bindingFromManifest(manifest), limits.MaxValidity); err != nil {
 		return err
 	}
 	if len(manifest.Files) == 0 {
@@ -136,7 +136,7 @@ func validateEnvelope(envelope Envelope, limits Limits) error {
 	if envelope.Kind != EnvelopeKind || envelope.Protocol != Protocol || envelope.ProtocolVersion != ProtocolVersion {
 		return fmt.Errorf("%w: unsupported envelope discriminator", ErrInvalidFormat)
 	}
-	if err := validateBinding(bindingFromEnvelope(envelope)); err != nil {
+	if err := validateBinding(bindingFromEnvelope(envelope), limits.MaxValidity); err != nil {
 		return err
 	}
 	if envelope.Encryption != EncryptionAlgorithm || envelope.SignatureAlgorithm != identity.Algorithm {

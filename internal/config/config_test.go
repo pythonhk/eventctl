@@ -10,6 +10,7 @@ import (
 	"github.com/pythonhk/eventctl/internal/envelope"
 	"github.com/pythonhk/eventctl/internal/identity"
 	"github.com/pythonhk/eventctl/internal/scorer"
+	"github.com/pythonhk/eventctl/internal/team"
 )
 
 func configPair(t *testing.T) identity.KeyPair {
@@ -155,6 +156,23 @@ func TestProposalAndSubmissionCapacityFieldBounds(t *testing.T) {
 	submissionPolicy.MaximumTotalAttempts = submissionPolicy.MaximumAttemptsPerTeam - 1
 	if err := validateSubmissions(submissionPolicy); err == nil {
 		t.Fatal("accepted maximum_attempts_per_team above maximum_total_attempts")
+	}
+}
+
+func TestTeamProposalTTLBounds(t *testing.T) {
+	t.Parallel()
+	teamPolicy := validEvent(t).Teams
+	for _, value := range []uint64{team.MinProposalTTLSeconds, 604_800, team.MaxProposalTTLSeconds} {
+		teamPolicy.ProposalTTLSeconds = value
+		if err := validateTeams(teamPolicy); err != nil {
+			t.Fatalf("proposal_ttl_seconds=%d rejected: %v", value, err)
+		}
+	}
+	for _, value := range []uint64{team.MinProposalTTLSeconds - 1, team.MaxProposalTTLSeconds + 1} {
+		teamPolicy.ProposalTTLSeconds = value
+		if err := validateTeams(teamPolicy); err == nil {
+			t.Fatalf("proposal_ttl_seconds=%d accepted", value)
+		}
 	}
 }
 

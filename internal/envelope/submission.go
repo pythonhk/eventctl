@@ -80,7 +80,7 @@ type Submission struct {
 // internal field relationships without authenticating its signature, trusted
 // actor/config context, GitHub metadata freshness, or current validity window.
 func (value Submission) ValidateUntrustedStructure() error {
-	if err := validateSubmission(value, time.Time{}); err != nil {
+	if err := validateSubmission(value, time.Time{}, MaxGenericValidity); err != nil {
 		return err
 	}
 	if err := value.Signature.ValidateEncoding(); err != nil {
@@ -168,7 +168,7 @@ func NewSubmission(params SubmissionParams, private identity.Private) ([]byte, e
 		ConfigDigest: params.ConfigDigest, IssuedAt: formatTime(params.IssuedAt), ExpiresAt: formatTime(params.ExpiresAt),
 		DeliveryMode: SubmissionDeliveryMode, Bundle: params.Bundle,
 	}
-	if err := validateSubmission(submission, time.Time{}); err != nil {
+	if err := validateSubmission(submission, time.Time{}, MaxGenericValidity); err != nil {
 		return nil, err
 	}
 	submission.Signature, err = Sign(SubmissionDomain, unsignedSubmission(submission), pair.Private)
@@ -181,7 +181,9 @@ func NewSubmission(params SubmissionParams, private identity.Private) ([]byte, e
 // VerifySubmission authenticates a post-push request with the exact registered
 // key. The intake must additionally fetch the head SHA, inspect the referenced
 // bundle, and cross-check every bundle binding before state admission.
-func VerifySubmission(raw []byte, expected Expected, registry identity.Registry) (VerifiedSubmission, error) {
+// envelopeTTL must be read from the authenticated event config bound by
+// expected.ConfigDigest.
+func VerifySubmission(raw []byte, expected Expected, envelopeTTL time.Duration, registry identity.Registry) (VerifiedSubmission, error) {
 	if len(raw) > MaxDocumentBytes {
 		return VerifiedSubmission{}, errors.New("submission document exceeds 1 MiB")
 	}
@@ -189,7 +191,7 @@ func VerifySubmission(raw []byte, expected Expected, registry identity.Registry)
 	if err := canonical.StrictUnmarshal(raw, &submission); err != nil {
 		return VerifiedSubmission{}, fmt.Errorf("decode submission: %w", err)
 	}
-	if err := validateSubmission(submission, expected.Now); err != nil {
+	if err := validateSubmission(submission, expected.Now, envelopeTTL); err != nil {
 		return VerifiedSubmission{}, err
 	}
 	if err := compareExpected(submission.EventID, submission.EventEpoch, submission.BaseRepository.ID, submission.ActorID, submission.ConfigDigest, submission.KeyEpoch, submission.KeyID, expected); err != nil {
@@ -242,7 +244,7 @@ func ParsePRMetadata(raw []byte) (PRMetadata, error) {
 	return metadata, nil
 }
 
-func validateSubmission(value Submission, now time.Time) error {
+func validateSubmission(value Submission, now time.Time, envelopeTTL time.Duration) error {
 	if value.Kind != SubmissionKind || value.Protocol != Protocol || value.ProtocolVersion != ProtocolVersion || value.DeliveryMode != SubmissionDeliveryMode {
 		return errors.New("submission protocol discriminator is invalid")
 	}
@@ -273,7 +275,7 @@ func validateSubmission(value Submission, now time.Time) error {
 	if err := validateBundleReference(value.Bundle); err != nil {
 		return err
 	}
-	return ValidateWindow(value.IssuedAt, value.ExpiresAt, now)
+	return validateRequestWindow(value.IssuedAt, value.ExpiresAt, now, envelopeTTL)
 }
 
 func validatePullRequest(value PullRequest) error {

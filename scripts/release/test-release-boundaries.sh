@@ -425,6 +425,7 @@ test_release_workflow_boundaries() {
 	local build_job="$temp_dir/release-build.yml"
 	local native_job="$temp_dir/release-native-preflight.yml"
 	local publish_job="$temp_dir/release-publish.yml"
+	local published_record_job="$temp_dir/release-published-record.yml"
 	local published_job="$temp_dir/release-published-native.yml"
 	awk '$0 == "  build:" { copy = 1 }
        copy && $0 == "  native-preflight:" { exit }
@@ -437,6 +438,9 @@ test_release_workflow_boundaries() {
 	awk '$0 == "  publish:" { copy = 1 }
        copy && $0 == "  published-release-record:" { exit }
        copy { print }' "$workflow" >"$publish_job"
+	awk '$0 == "  published-release-record:" { copy = 1 }
+       copy && $0 == "  published-native:" { exit }
+       copy { print }' "$workflow" >"$published_record_job"
 
 	assert_contains "tag build reruns the exact full Go gate" \
 		'scripts/check.sh' "$build_job"
@@ -493,6 +497,10 @@ test_release_workflow_boundaries() {
 		'native-preflight' "$publish_job"
 	assert_attestation_pairs "$publish_job"
 
+	assert_contains "published release-record verification can read attestations" \
+		'attestations: read' "$published_record_job"
+	assert_contains "published native verification can read attestations" \
+		'attestations: read' "$published_job"
 	assert_contains "published native checks depend on immutable record verification" \
 		'published-release-record' "$published_job"
 	# GitHub expressions are intentionally matched literally.

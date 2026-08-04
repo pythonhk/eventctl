@@ -77,7 +77,7 @@ func submissionVerifyPublic(args []string) (any, error) {
 	if e.EventID != event.EventID || e.EventEpoch != event.EventEpoch || e.BaseRepositoryID != event.BaseRepository.ID || e.ConfigDigest != digest || e.RecipientEpoch != event.Submissions.Encryption.RecipientEpoch || !slices.Equal(e.RecipientKeyIDs, configuredRecipientIDs) {
 		return nil, verificationError("authenticated bundle does not match trusted event/config recipient set", nil)
 	}
-	if err := envelope.ValidateWindow(e.IssuedAt, e.ExpiresAt, time.Now().UTC()); err != nil {
+	if err := envelope.ValidateWindowWithin(e.IssuedAt, e.ExpiresAt, time.Now().UTC(), time.Duration(event.Submissions.EnvelopeTTLSeconds)*time.Second); err != nil {
 		return nil, verificationError("bundle validity window", err)
 	}
 	normalized := normalizedPublicBundle{"verified", bundle.EnvelopeKind, inspection.EnvelopeSHA256, inspection.BundleSHA256, inspection.BundleSize, inspection.Envelope, record}

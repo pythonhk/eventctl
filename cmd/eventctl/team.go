@@ -80,11 +80,12 @@ func teamPropose(args []string, stderr io.Writer) (any, error) {
 		return nil, invalidError("team size is outside configured bounds", nil)
 	}
 	issued := time.Now().UTC().Truncate(time.Second)
-	raw, err := team.NewProposal(team.ProposalParams{EventID: event.EventID, EventEpoch: event.EventEpoch, OperationID: *requestID, TeamID: *teamID, ProposerActorID: *actorID, KeyEpoch: keyEpoch, MemberActorIDs: members, BaseRepository: event.BaseRepository, ConfigDigest: digest, IssuedAt: issued, ExpiresAt: issued.Add(time.Duration(event.Teams.ProposalTTLSeconds) * time.Second)}, pair.Private)
+	proposalTTL := time.Duration(event.Teams.ProposalTTLSeconds) * time.Second
+	raw, err := team.NewProposal(team.ProposalParams{EventID: event.EventID, EventEpoch: event.EventEpoch, OperationID: *requestID, TeamID: *teamID, ProposerActorID: *actorID, KeyEpoch: keyEpoch, MemberActorIDs: members, BaseRepository: event.BaseRepository, ConfigDigest: digest, IssuedAt: issued, ExpiresAt: issued.Add(proposalTTL)}, pair.Private)
 	if err != nil {
 		return nil, invalidError("create team proposal", err)
 	}
-	verified, err := team.VerifyProposal(raw, envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ActorID: *actorID, ConfigDigest: digest, Now: issued}, registry)
+	verified, err := team.VerifyProposal(raw, envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ActorID: *actorID, ConfigDigest: digest, Now: issued}, proposalTTL, registry)
 	if err != nil {
 		return nil, verificationError("self-verify team proposal", err)
 	}
@@ -137,11 +138,12 @@ func teamConsent(args []string, stderr io.Writer) (any, error) {
 		return nil, ioError("read team proposal", err)
 	}
 	issued := time.Now().UTC().Truncate(time.Second)
-	raw, err := team.NewConsent(proposalRaw, team.ConsentParams{OperationID: *requestID, ActorID: *actorID, KeyEpoch: keyEpoch, IssuedAt: issued, ExpiresAt: issued.Add(time.Duration(event.Teams.ProposalTTLSeconds) * time.Second)}, pair.Private, registry)
+	proposalTTL := time.Duration(event.Teams.ProposalTTLSeconds) * time.Second
+	raw, err := team.NewConsent(proposalRaw, team.ConsentParams{OperationID: *requestID, ActorID: *actorID, KeyEpoch: keyEpoch, IssuedAt: issued, ExpiresAt: issued.Add(proposalTTL)}, pair.Private, registry)
 	if err != nil {
 		return nil, invalidError("create team consent", err)
 	}
-	verified, err := team.VerifyConsent(proposalRaw, raw, envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ConfigDigest: meta.ConfigDigest, Now: issued}, registry)
+	verified, err := team.VerifyConsent(proposalRaw, raw, envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ConfigDigest: meta.ConfigDigest, Now: issued}, proposalTTL, registry)
 	if err != nil {
 		return nil, verificationError("self-verify team consent", err)
 	}
@@ -192,10 +194,11 @@ func teamVerify(args []string) (any, error) {
 		return nil, invalidError("read team request kind", err)
 	}
 	expected := envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ConfigDigest: digest, Now: sourceTime}
+	proposalTTL := time.Duration(event.Teams.ProposalTTLSeconds) * time.Second
 	var normalized normalizedRequest
 	switch kind {
 	case team.ProposalKind:
-		verified, verifyErr := team.VerifyProposal(requestRaw, expected, registry)
+		verified, verifyErr := team.VerifyProposal(requestRaw, expected, proposalTTL, registry)
 		if verifyErr != nil {
 			return nil, verificationError("verify team proposal", verifyErr)
 		}
@@ -209,7 +212,7 @@ func teamVerify(args []string) (any, error) {
 		if loadErr != nil {
 			return nil, verificationError("load verified team proposal", loadErr)
 		}
-		verified, verifyErr := team.VerifyConsent(proposalRaw, requestRaw, expected, registry)
+		verified, verifyErr := team.VerifyConsent(proposalRaw, requestRaw, expected, proposalTTL, registry)
 		if verifyErr != nil {
 			return nil, verificationError("verify team consent", verifyErr)
 		}

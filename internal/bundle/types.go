@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	protocolenvelope "github.com/pythonhk/eventctl/internal/envelope"
 )
@@ -66,6 +67,7 @@ type Limits struct {
 	MaxPlaintextBytes  uint64
 	MaxRecipients      uint32
 	MaxTotalFileBytes  uint64
+	MaxValidity        time.Duration
 }
 
 // DefaultLimits returns the v1 hard processing limits.
@@ -79,6 +81,7 @@ func DefaultLimits() Limits {
 		MaxPlaintextBytes:  MaxPlaintextBytesV1,
 		MaxRecipients:      32,
 		MaxTotalFileBytes:  MaxPlaintextBytesV1,
+		MaxValidity:        protocolenvelope.MaxGenericValidity,
 	}
 }
 
@@ -86,11 +89,15 @@ func normalizeLimits(limits Limits) (Limits, error) {
 	if limits == (Limits{}) {
 		return DefaultLimits(), nil
 	}
+	hard := DefaultLimits()
 	if limits.MaxCiphertextBytes == 0 || limits.MaxEnvelopeBytes == 0 ||
 		limits.MaxFileBytes == 0 || limits.MaxFiles == 0 ||
 		limits.MaxManifestBytes == 0 || limits.MaxPlaintextBytes == 0 || limits.MaxRecipients == 0 ||
-		limits.MaxTotalFileBytes == 0 {
+		limits.MaxTotalFileBytes == 0 || limits.MaxValidity <= 0 {
 		return Limits{}, fmt.Errorf("%w: every custom limit must be positive", ErrLimitExceeded)
+	}
+	if limits.MaxValidity < time.Second || limits.MaxValidity%time.Second != 0 {
+		return Limits{}, fmt.Errorf("%w: maximum validity must be positive whole seconds", ErrLimitExceeded)
 	}
 	if limits.MaxFileBytes > limits.MaxTotalFileBytes {
 		return Limits{}, fmt.Errorf("%w: maximum file size exceeds maximum total size", ErrLimitExceeded)
@@ -98,14 +105,14 @@ func normalizeLimits(limits Limits) (Limits, error) {
 	if limits.MaxTotalFileBytes > limits.MaxPlaintextBytes {
 		return Limits{}, fmt.Errorf("%w: maximum total file size exceeds maximum plaintext size", ErrLimitExceeded)
 	}
-	hard := DefaultLimits()
 	if limits.MaxCiphertextBytes > hard.MaxCiphertextBytes ||
 		limits.MaxEnvelopeBytes > hard.MaxEnvelopeBytes ||
 		limits.MaxFileBytes > hard.MaxFileBytes || limits.MaxFiles > hard.MaxFiles ||
 		limits.MaxManifestBytes > hard.MaxManifestBytes ||
 		limits.MaxPlaintextBytes > hard.MaxPlaintextBytes ||
 		limits.MaxRecipients > hard.MaxRecipients ||
-		limits.MaxTotalFileBytes > hard.MaxTotalFileBytes {
+		limits.MaxTotalFileBytes > hard.MaxTotalFileBytes ||
+		limits.MaxValidity > hard.MaxValidity {
 		return Limits{}, fmt.Errorf("%w: custom limits exceed the v1 hard processing profile", ErrLimitExceeded)
 	}
 	if limits.MaxFileBytes >= math.MaxInt64 || limits.MaxTotalFileBytes >= math.MaxInt64 ||
