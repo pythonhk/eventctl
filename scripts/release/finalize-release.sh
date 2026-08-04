@@ -44,6 +44,7 @@ actual_assets=$(mktemp "${TMPDIR:-/tmp}/eventctl-finalize-actual.XXXXXX")
 # Invoked by the trap below.
 # shellcheck disable=SC2329
 cleanup() {
+	# shellcheck disable=SC2317 # Reached indirectly through the EXIT/signal trap.
 	rm -f -- "$expected_assets" "$actual_assets"
 }
 trap cleanup EXIT HUP INT TERM
