@@ -53,6 +53,11 @@ jobs:
         id: tools
         run: scripts/release/load-tool-versions.sh
 
+      - name: Install pinned ShellCheck
+        run: >-
+          scripts/release/install-shellcheck.sh
+          "$RUNNER_TEMP/eventctl-shellcheck-bin"
+
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -74,7 +79,8 @@ jobs:
 
       - name: Run complete Bash and workflow gates
         run: |
-          find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
+          find scripts -type f -name '*.sh' -print0 | \
+            xargs -0 "$RUNNER_TEMP/eventctl-shellcheck-bin/shellcheck"
           go run mvdan.cc/sh/v3/cmd/shfmt@${{ steps.tools.outputs.shfmt }} -d -ci scripts
           go run github.com/rhysd/actionlint/cmd/actionlint@${{ steps.tools.outputs.actionlint }}
           scripts/release/check-action-pins.sh
