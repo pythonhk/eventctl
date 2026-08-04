@@ -1,0 +1,9 @@
+* @alex-au-922
+
+/.github/ @alex-au-922
+/.goreleaser.yaml @alex-au-922
+/cmd/ @alex-au-922
+/internal/ @alex-au-922
+/scripts/release/ @alex-au-922
+/go.mod @alex-au-922
+/go.sum @alex-au-922

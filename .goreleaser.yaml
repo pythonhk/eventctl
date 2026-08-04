@@ -1,0 +1,92 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/goreleaser/goreleaser/v2.17.1/www/docs/static/schema.json
+version: 2
+
+project_name: eventctl
+
+env:
+  - SYFT_CHECK_FOR_APP_UPDATE=false
+
+builds:
+  - id: eventctl
+    main: ./cmd/eventctl
+    binary: eventctl
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+      - -buildvcs=true
+      - -mod=readonly
+    ldflags:
+      - >-
+        -s -w -buildid=
+        -X github.com/pythonhk/eventctl/internal/buildinfo.Version={{ .Version }}
+        -X github.com/pythonhk/eventctl/internal/buildinfo.Commit={{ .FullCommit }}
+        -X github.com/pythonhk/eventctl/internal/buildinfo.Date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: eventctl-archives
+    ids:
+      - eventctl
+    name_template: "eventctl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    builds_info:
+      owner: root
+      group: root
+      mode: 0755
+      mtime: "{{ .CommitDate }}"
+    # Keep the archive surface exact and flat: one binary plus its license.
+    files:
+      - src: LICENSE
+        dst: LICENSE
+        info:
+          owner: root
+          group: root
+          mode: 0644
+          mtime: "{{ .CommitDate }}"
+
+sboms:
+  - id: archive-spdx
+    artifacts: archive
+    ids:
+      - eventctl-archives
+    documents:
+      - "${artifact}.spdx.json"
+    cmd: syft
+    args:
+      - "$artifact"
+      - --output
+      - "spdx-json=$document"
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+  ids:
+    - eventctl-archives
+
+snapshot:
+  version_template: "0.0.0-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - '^docs(?:\([^)]*\))?:'
+      - '^test(?:\([^)]*\))?:'
+      - '^chore(?:\([^)]*\))?:'
+
+release:
+  disable: true
