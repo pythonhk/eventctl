@@ -56,12 +56,20 @@ state and are not supplied by the source tree.
    and tags to protected `v*` tags.
 3. Enable **release immutability** in repository settings. This applies only to
    releases published after it is enabled.
-4. Add a tag ruleset for `v*` that restricts creation to release maintainers
-   and blocks update and deletion. Published immutable releases also lock their
+4. Add two active tag rulesets for `v*`:
+   - a creation-only ruleset whose bypass list contains only the named release
+     maintainer; and
+   - a separate immutable-tag ruleset with no bypass that restricts updates
+     and deletions and blocks force pushes.
+   Keeping these rules separate prevents the creation bypass from authorizing a
+   later tag rewrite or deletion. Published immutable releases also lock their
    tag and assets.
 5. Protect `main`: require pull requests, CODEOWNERS review for
    `.github/workflows/**`, `.goreleaser.yaml`, `scripts/release/**`, and
-   `internal/buildinfo/**`, and require the complete CI check set.
+   `internal/buildinfo/**`, and require the complete CI check set. Before
+   activating this rule, merge the reviewed CODEOWNERS change and confirm that
+   the default-branch CODEOWNERS names an independent maintainer; GitHub
+   evaluates CODEOWNERS from the pull request's base branch.
 6. Allow only the actions used by the workflows. They are pinned to full
    40-character commit SHAs; the version comments are review hints, not the
    security boundary.
@@ -69,7 +77,7 @@ state and are not supplied by the source tree.
    available before the first public release.
 
 Before approving the first `release` environment deployment, an administrator
-must read back the immutable-release setting and the tag ruleset from GitHub.
+must read back the immutable-release setting and both tag rulesets from GitHub.
 The release job also requires `isImmutable: true` after publication and fails
 otherwise, but that postcondition is not a substitute for the pre-release
 readback.
@@ -138,59 +146,80 @@ requires GitHub CLI 2.93.0 or newer. Versions through 2.92.0 are affected by
 and must not be used for release or attestation verification.
 
 ```bash
-tag=v1.2.3
-version=${tag#v}
-asset="eventctl_${version}_darwin_arm64.tar.gz"
-# Read this full 40- or 64-character value from the reviewed event lock.
-source_digest="$EVENTCTL_SOURCE_DIGEST"
-signer_digest="$EVENTCTL_SIGNER_DIGEST"
-# Read the exact UTC source commit date from the same reviewed lock.
-source_date="$EVENTCTL_SOURCE_DATE"
+lock=/absolute/path/to/tools/eventctl.lock.json
+platform=darwin-arm64
+repository=$(jq -er '.repository' "$lock")
+version=$(jq -er '.version' "$lock")
+source_ref=$(jq -er '.attestation.source_ref' "$lock")
+tag=${source_ref#refs/tags/}
+asset=$(jq -er --arg platform "$platform" '.assets[$platform].name' "$lock")
+source_digest=$(jq -er '.attestation.source_digest' "$lock")
+signer_digest=$(jq -er '.attestation.signer_digest' "$lock")
+signer_workflow=$(jq -er '.attestation.signer_workflow' "$lock")
+source_date=$(jq -er '.attestation.source_date' "$lock")
+provenance_predicate=$(jq -er '.attestation.predicate_type' "$lock")
+sbom_predicate=$(jq -er '.attestation.sbom_predicate_type' "$lock")
+expected_manifest_digest=$(jq -er '.checksums.sha256' "$lock")
+expected_archive_digest=$(jq -er --arg platform "$platform" \
+  '.assets[$platform].sha256' "$lock")
+expected_binary_digest=$(jq -er --arg platform "$platform" \
+  '.assets[$platform].binary_sha256' "$lock")
 expected_os=darwin
 expected_arch=arm64
 
+test "$repository" = pythonhk/eventctl
+test "$(jq -er '.attestation.repository' "$lock")" = "$repository"
+test "$tag" = "v$version"
+test "$source_ref" = "refs/tags/$tag"
+test "$signer_workflow" = pythonhk/eventctl/.github/workflows/release.yml
 [[ $source_digest =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
 [[ $signer_digest =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
 [[ $signer_digest == "$source_digest" ]]
 [[ $source_date =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+[[ $expected_manifest_digest =~ ^[0-9a-f]{64}$ ]]
+[[ $expected_archive_digest =~ ^[0-9a-f]{64}$ ]]
+[[ $expected_binary_digest =~ ^[0-9a-f]{64}$ ]]
 
 # Fail before any network access if GitHub CLI is absent, unsupported, or old.
 scripts/release/require-gh-version.sh
 
 # Verify the immutable release record before downloading any asset.
-gh release verify "$tag" --repo pythonhk/eventctl
+gh release verify "$tag" --repo "$repository"
 
 gh release download "$tag" \
-  --repo pythonhk/eventctl \
+  --repo "$repository" \
   --pattern "$asset" \
   --pattern SHA256SUMS
 
 # Bind both downloaded files to the already-verified immutable release before
 # trusting their contents or executing the binary.
-gh release verify-asset "$tag" "$asset" --repo pythonhk/eventctl
-gh release verify-asset "$tag" SHA256SUMS --repo pythonhk/eventctl
+gh release verify-asset "$tag" "$asset" --repo "$repository"
+gh release verify-asset "$tag" SHA256SUMS --repo "$repository"
 
+manifest_actual=$(shasum -a 256 SHA256SUMS | awk '{ print $1 }')
+test "$manifest_actual" = "$expected_manifest_digest"
 expected=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1 }' SHA256SUMS)
 actual=$(shasum -a 256 "$asset" | awk '{ print $1 }')
 test "$actual" = "$expected"
+test "$actual" = "$expected_archive_digest"
 
 gh attestation verify "$asset" \
-  --repo pythonhk/eventctl \
+  --repo "$repository" \
   --deny-self-hosted-runners \
   --signer-digest "$signer_digest" \
-  --signer-workflow pythonhk/eventctl/.github/workflows/release.yml \
-  --source-ref "refs/tags/$tag" \
+  --signer-workflow "$signer_workflow" \
+  --source-ref "$source_ref" \
   --source-digest "$source_digest" \
-  --predicate-type https://slsa.dev/provenance/v1
+  --predicate-type "$provenance_predicate"
 
 gh attestation verify "$asset" \
-  --repo pythonhk/eventctl \
+  --repo "$repository" \
   --deny-self-hosted-runners \
   --signer-digest "$signer_digest" \
-  --signer-workflow pythonhk/eventctl/.github/workflows/release.yml \
-  --source-ref "refs/tags/$tag" \
+  --signer-workflow "$signer_workflow" \
+  --source-ref "$source_ref" \
   --source-digest "$source_digest" \
-  --predicate-type https://spdx.dev/Document/v2.3
+  --predicate-type "$sbom_predicate"
 
 # Reject duplicate, traversal, link, and extra-entry archive shapes before use.
 expected_entries=$(printf '%s\n' LICENSE eventctl | LC_ALL=C sort)
@@ -201,6 +230,8 @@ trap 'rm -rf -- "$verify_dir"' EXIT HUP INT TERM
 tar -xzf "$asset" -C "$verify_dir"
 test -f "$verify_dir/eventctl" && test ! -L "$verify_dir/eventctl"
 test -f "$verify_dir/LICENSE" && test ! -L "$verify_dir/LICENSE"
+binary_actual=$(shasum -a 256 "$verify_dir/eventctl" | awk '{ print $1 }')
+test "$binary_actual" = "$expected_binary_digest"
 version_json=$("$verify_dir/eventctl" version --json)
 printf '%s' "$version_json" | jq -e \
   --arg version "$version" \

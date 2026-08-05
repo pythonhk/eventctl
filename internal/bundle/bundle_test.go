@@ -16,10 +16,20 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"filippo.io/age"
 	"github.com/pythonhk/eventctl/internal/identity"
 )
+
+func TestCustomLimitsRequireExplicitMaxValidity(t *testing.T) {
+	t.Parallel()
+	custom := DefaultLimits()
+	custom.MaxValidity = 0
+	if _, err := normalizeLimits(custom); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("normalizeLimits() error = %v, want ErrLimitExceeded", err)
+	}
+}
 
 func TestPackInspectVerifyAndDecryptRoundTrip(t *testing.T) {
 	t.Parallel()
@@ -309,6 +319,40 @@ func TestAuthenticatePublicVerifiesOuterSignatureBeforeCiphertext(t *testing.T) 
 	mustWriteFile(t, badPath, mutated, 0o600)
 	if _, err := AuthenticatePublic(context.Background(), badPath, pair.Public, Limits{}); !errors.Is(err, ErrSignature) {
 		t.Fatalf("AuthenticatePublic() error = %v, want ErrSignature before ciphertext digest", err)
+	}
+}
+
+func TestPublicAndDecryptVerificationEnforceConfiguredValidity(t *testing.T) {
+	t.Parallel()
+	fixture := newCryptoFixture(t)
+	pair, err := identity.FromSeed(fixture.privateKey.Seed())
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured := DefaultLimits()
+	configured.MaxValidity = 15 * time.Minute
+	if _, err := AuthenticatePublic(context.Background(), makeValidBundle(t, fixture), pair.Public, configured); err != nil {
+		t.Fatalf("exact configured bundle TTL rejected: %v", err)
+	}
+
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	mustMkdirAll(t, source)
+	mustWriteFile(t, filepath.Join(source, "data.txt"), []byte("submission\n"), 0o600)
+	binding := fixture.binding()
+	binding.ExpiresAt = "2030-06-01T02:15:01Z"
+	over := filepath.Join(root, "over-ttl.evt")
+	if _, err := PackDirectory(context.Background(), PackOptions{
+		SourceDir: source, OutputPath: over, Binding: binding,
+		Recipients: []*age.HybridRecipient{fixture.recipient}, SigningKey: fixture.privateKey,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AuthenticatePublic(context.Background(), over, pair.Public, configured); err == nil {
+		t.Fatal("public verification accepted a bundle above the signed config TTL")
+	}
+	if _, err := Verify(context.Background(), over, []*age.HybridIdentity{fixture.identity}, fixture.publicKey, configured); err == nil {
+		t.Fatal("decrypt verification accepted a bundle above the signed config TTL")
 	}
 }
 

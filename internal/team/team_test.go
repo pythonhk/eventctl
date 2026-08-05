@@ -38,7 +38,7 @@ func TestUnanimousTeamRequiresEveryMemberIncludingProposer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	verified, err := VerifyProposal(proposal, envelope.Expected{Now: issued.Add(time.Minute)}, r)
+	verified, err := VerifyProposal(proposal, envelope.Expected{Now: issued.Add(time.Minute)}, 15*time.Minute, r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,10 +53,10 @@ func TestUnanimousTeamRequiresEveryMemberIncludingProposer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyUnanimous(proposal, [][]byte{c10}, envelope.Expected{Now: issued.Add(time.Minute)}, r); err == nil {
+	if _, err := VerifyUnanimous(proposal, [][]byte{c10}, envelope.Expected{Now: issued.Add(time.Minute)}, 15*time.Minute, r); err == nil {
 		t.Fatal("accepted missing proposer consent")
 	}
-	candidate, err := VerifyUnanimous(proposal, [][]byte{c10, c2}, envelope.Expected{Now: issued.Add(time.Minute)}, r)
+	candidate, err := VerifyUnanimous(proposal, [][]byte{c10, c2}, envelope.Expected{Now: issued.Add(time.Minute)}, 15*time.Minute, r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,83 @@ func TestProposalRejectsAttackerKeyForTrustedActor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyProposal(proposal, envelope.Expected{}, r); err == nil {
+	if _, err := VerifyProposal(proposal, envelope.Expected{}, 15*time.Minute, r); err == nil {
 		t.Fatal("accepted attacker key")
+	}
+}
+
+func TestDefaultSevenDayProposalWindow(t *testing.T) {
+	t.Parallel()
+	proposer := pair(t, 11)
+	r := registry(t, []identity.RegistryEntry{{ActorID: "11", KeyEpoch: "1", Identity: proposer.Public}})
+	issued := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	proposal, err := NewProposal(ProposalParams{
+		EventID: "summer-data-2026", EventEpoch: "1",
+		OperationID: "50000000-0000-4000-8000-000000000005", TeamID: "51000000-0000-4000-8000-000000000005",
+		ProposerActorID: "11", KeyEpoch: "1", MemberActorIDs: []string{"11"},
+		BaseRepository: envelope.Repository{ID: "9", Owner: "pythonhk", Name: "event"},
+		ConfigDigest:   strings.Repeat("c", 64), IssuedAt: issued, ExpiresAt: issued.Add(7 * 24 * time.Hour),
+	}, proposer.Private)
+	if err != nil {
+		t.Fatalf("create default seven-day proposal: %v", err)
+	}
+	if _, err := VerifyProposal(proposal, envelope.Expected{Now: issued.Add(time.Minute)}, 7*24*time.Hour, r); err != nil {
+		t.Fatalf("verify default seven-day proposal: %v", err)
+	}
+	consent, err := NewConsent(proposal, ConsentParams{
+		OperationID: "52000000-0000-4000-8000-000000000005", ActorID: "11", KeyEpoch: "1",
+		IssuedAt: issued, ExpiresAt: issued.Add(7 * 24 * time.Hour),
+	}, proposer.Private, r)
+	if err != nil {
+		t.Fatalf("create default seven-day consent: %v", err)
+	}
+	if _, err := VerifyConsent(proposal, consent, envelope.Expected{Now: issued.Add(time.Minute)}, 7*24*time.Hour, r); err != nil {
+		t.Fatalf("verify default seven-day consent: %v", err)
+	}
+}
+
+func TestTeamVerificationRejectsInvalidOrExceededConfiguredTTL(t *testing.T) {
+	t.Parallel()
+	proposer := pair(t, 12)
+	r := registry(t, []identity.RegistryEntry{{ActorID: "12", KeyEpoch: "1", Identity: proposer.Public}})
+	issued := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	base := ProposalParams{
+		EventID: "summer-data-2026", EventEpoch: "1",
+		OperationID: "60000000-0000-4000-8000-000000000006", TeamID: "61000000-0000-4000-8000-000000000006",
+		ProposerActorID: "12", KeyEpoch: "1", MemberActorIDs: []string{"12"},
+		BaseRepository: envelope.Repository{ID: "9", Owner: "pythonhk", Name: "event"},
+		ConfigDigest:   strings.Repeat("d", 64), IssuedAt: issued,
+	}
+
+	overConfigured := base
+	overConfigured.ExpiresAt = issued.Add(30 * time.Minute)
+	proposal, err := NewProposal(overConfigured, proposer.Private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyProposal(proposal, envelope.Expected{Now: issued.Add(time.Minute)}, 15*time.Minute, r); err == nil {
+		t.Fatal("accepted proposal above the signed config TTL")
+	}
+	if _, err := VerifyProposal(proposal, envelope.Expected{Now: issued.Add(time.Minute)}, MaxProposalTTL+time.Second, r); err == nil {
+		t.Fatal("accepted an out-of-protocol configured proposal TTL")
+	}
+
+	compliant := base
+	compliant.OperationID = "62000000-0000-4000-8000-000000000006"
+	compliant.TeamID = "63000000-0000-4000-8000-000000000006"
+	compliant.ExpiresAt = issued.Add(15 * time.Minute)
+	proposal, err = NewProposal(compliant, proposer.Private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consent, err := NewConsent(proposal, ConsentParams{
+		OperationID: "64000000-0000-4000-8000-000000000006", ActorID: "12", KeyEpoch: "1",
+		IssuedAt: issued, ExpiresAt: issued.Add(30 * time.Minute),
+	}, proposer.Private, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyConsent(proposal, consent, envelope.Expected{Now: issued.Add(time.Minute)}, 15*time.Minute, r); err == nil {
+		t.Fatal("accepted consent above the signed config TTL")
 	}
 }

@@ -225,7 +225,7 @@ func loadScorerTrust(configPath, authorityPath, statePath, acceptancePath string
 
 func verifyScorerAcceptance(verified receipt.Verified, request scorer.Request) error {
 	document := verified.Document
-	if verified.DocumentDigest != request.ReservationReceiptDigest || document.RequestKind != envelope.SubmissionKind || document.Outcome != "accepted" || !document.QuotaCharged || document.ActorID != request.ActorID || document.TeamID == nil || *document.TeamID != request.TeamID || document.AttemptID == nil || *document.AttemptID != request.AttemptID || document.RequestDocumentDigest != request.SubmissionEnvelopeDigest || !document.StateAfter.Equal(request.Reservation) || document.SourceCreatedAt != request.SourceCreatedAt || document.IssuedAt != request.AcceptedAt || document.ScorerResultDigest != nil || document.ReservationReceiptDigest != nil {
+	if verified.DocumentDigest != request.ReservationReceiptDigest || document.RequestKind != envelope.SubmissionKind || document.Outcome != "accepted" || !document.QuotaCharged || document.ActorID != request.ActorID || document.TeamID == nil || *document.TeamID != request.TeamID || document.AttemptID == nil || *document.AttemptID != request.AttemptID || document.RequestDocumentDigest == nil || *document.RequestDocumentDigest != request.SubmissionEnvelopeDigest || !document.StateAfter.Equal(request.Reservation) || document.SourceCreatedAt != request.SourceCreatedAt || document.IssuedAt != request.AcceptedAt || document.ScorerResultDigest != nil || document.ReservationReceiptDigest != nil {
 		return errors.New("reservation receipt does not exactly bind scorer request acceptance")
 	}
 	if err := document.ValidateSourceWindow(request.IssuedAt, request.ExpiresAt); err != nil {

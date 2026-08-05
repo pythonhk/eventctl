@@ -20,6 +20,7 @@ import (
 	"github.com/pythonhk/eventctl/internal/identity"
 	"github.com/pythonhk/eventctl/internal/scorer"
 	"github.com/pythonhk/eventctl/internal/statepointer"
+	"github.com/pythonhk/eventctl/internal/team"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -456,7 +457,7 @@ func validateRegistration(v Registration) error {
 	return nil
 }
 func validateTeams(v Teams) error {
-	if v.MinimumSize < 1 || v.MaximumSize < 1 || v.MinimumSize > v.MaximumSize || v.MaximumSize > 64 || v.MaximumProposalsPerParticipant < 1 || v.MaximumProposalsPerParticipant > MaxTeamProposalsPerParticipantV1 || v.ProposalTTLSeconds < 300 || v.ProposalTTLSeconds > 1209600 || v.MembershipLockPhase != "submissions_open" {
+	if v.MinimumSize < 1 || v.MaximumSize < 1 || v.MinimumSize > v.MaximumSize || v.MaximumSize > 64 || v.MaximumProposalsPerParticipant < 1 || v.MaximumProposalsPerParticipant > MaxTeamProposalsPerParticipantV1 || v.ProposalTTLSeconds < team.MinProposalTTLSeconds || v.ProposalTTLSeconds > team.MaxProposalTTLSeconds || v.MembershipLockPhase != "submissions_open" {
 		return errors.New("team configuration is invalid")
 	}
 	return nil

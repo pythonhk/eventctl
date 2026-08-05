@@ -61,7 +61,7 @@ func PackDirectory(ctx context.Context, options PackOptions) (Packed, error) {
 	if options.Binding.KeyID != signerKeyID {
 		return Packed{}, fmt.Errorf("signing key ID does not match binding key_id")
 	}
-	if err := validateBinding(options.Binding); err != nil {
+	if err := validateBinding(options.Binding, limits.MaxValidity); err != nil {
 		return Packed{}, err
 	}
 	if options.SourceDir == "" || options.OutputPath == "" {

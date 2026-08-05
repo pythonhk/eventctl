@@ -24,6 +24,7 @@ const (
 	ReplayKeyPrefix      = "pythonhk.github-native-event/v1/replay-key\x00"
 	MaxDocumentBytes     = 1 << 20
 	MaxSubmissionFilesV1 = 4_096
+	MaxGenericValidity   = 24 * time.Hour
 
 	RegistrationKind   = "registration_request"
 	RegistrationDomain = "registration_request"
@@ -140,7 +141,7 @@ type VerifiedRegistration struct {
 // internal field relationships without authenticating its signature, trusted
 // actor/config context, or current validity window.
 func (value Registration) ValidateUntrustedStructure() error {
-	if err := validateRegistration(value, time.Time{}); err != nil {
+	if err := validateRegistration(value, time.Time{}, MaxGenericValidity); err != nil {
 		return err
 	}
 	if value.ParticipantKey.KeyID != value.KeyID {
@@ -190,7 +191,7 @@ func NewRegistration(params RegistrationParams, private identity.Private) ([]byt
 		TermsDigest: params.TermsDigest, IssuedAt: formatTime(params.IssuedAt), ExpiresAt: formatTime(params.ExpiresAt),
 		ParticipantKey: pair.Public,
 	}
-	if err := validateRegistration(registration, time.Time{}); err != nil {
+	if err := validateRegistration(registration, time.Time{}, MaxGenericValidity); err != nil {
 		return nil, err
 	}
 	registration.Signature, err = Sign(RegistrationDomain, registrationUnsignedFrom(registration), pair.Private)
@@ -201,8 +202,9 @@ func NewRegistration(params RegistrationParams, private identity.Private) ([]byt
 }
 
 // VerifyRegistration verifies strict structure, trusted context, validity
-// window, self-signature, and epoch-1 proof of possession.
-func VerifyRegistration(raw []byte, expected Expected) (VerifiedRegistration, error) {
+// window, self-signature, and epoch-1 proof of possession. requestTTL must be
+// read from the authenticated event config bound by expected.ConfigDigest.
+func VerifyRegistration(raw []byte, expected Expected, requestTTL time.Duration) (VerifiedRegistration, error) {
 	if len(raw) > MaxDocumentBytes {
 		return VerifiedRegistration{}, errors.New("registration document exceeds 1 MiB")
 	}
@@ -210,7 +212,7 @@ func VerifyRegistration(raw []byte, expected Expected) (VerifiedRegistration, er
 	if err := canonical.StrictUnmarshal(raw, &registration); err != nil {
 		return VerifiedRegistration{}, fmt.Errorf("decode registration: %w", err)
 	}
-	if err := validateRegistration(registration, expected.Now); err != nil {
+	if err := validateRegistration(registration, expected.Now, requestTTL); err != nil {
 		return VerifiedRegistration{}, err
 	}
 	if err := compareExpected(registration.EventID, registration.EventEpoch, registration.BaseRepository.ID, registration.ActorID, registration.ConfigDigest, registration.KeyEpoch, registration.KeyID, expected); err != nil {
@@ -382,6 +384,25 @@ func ParseTimestamp(value string) (time.Time, error) {
 }
 
 func ValidateWindow(issuedText, expiresText string, now time.Time) error {
+	return validateWindowWithin(issuedText, expiresText, now, MaxGenericValidity, "validity window exceeds 24 hours")
+}
+
+// ValidateWindowWithin validates a protocol window against an operation-specific
+// maximum. Callers must derive maximumValidity from independently trusted policy.
+func ValidateWindowWithin(issuedText, expiresText string, now time.Time, maximumValidity time.Duration) error {
+	if maximumValidity <= 0 || maximumValidity%time.Second != 0 {
+		return errors.New("maximum validity window must be positive whole seconds")
+	}
+	return validateWindowWithin(
+		issuedText,
+		expiresText,
+		now,
+		maximumValidity,
+		fmt.Sprintf("validity window exceeds configured maximum of %s", maximumValidity),
+	)
+}
+
+func validateWindowWithin(issuedText, expiresText string, now time.Time, maximumValidity time.Duration, tooLongMessage string) error {
 	issued, err := ParseTimestamp(issuedText)
 	if err != nil {
 		return err
@@ -393,8 +414,8 @@ func ValidateWindow(issuedText, expiresText string, now time.Time) error {
 	if !expires.After(issued) {
 		return errors.New("expires_at must be after issued_at")
 	}
-	if expires.Sub(issued) > 24*time.Hour {
-		return errors.New("validity window exceeds 24 hours")
+	if expires.Sub(issued) > maximumValidity {
+		return errors.New(tooLongMessage)
 	}
 	if !now.IsZero() {
 		now = now.UTC()
@@ -420,7 +441,7 @@ func formatTime(value time.Time) string {
 	return value.UTC().Truncate(time.Second).Format("2006-01-02T15:04:05Z")
 }
 
-func validateRegistration(value Registration, now time.Time) error {
+func validateRegistration(value Registration, now time.Time, requestTTL time.Duration) error {
 	if value.Kind != RegistrationKind || value.Protocol != Protocol || value.ProtocolVersion != ProtocolVersion {
 		return errors.New("registration protocol discriminator is invalid")
 	}
@@ -448,7 +469,17 @@ func validateRegistration(value Registration, now time.Time) error {
 	if err := value.ParticipantKey.Validate(); err != nil {
 		return err
 	}
-	return ValidateWindow(value.IssuedAt, value.ExpiresAt, now)
+	return validateRequestWindow(value.IssuedAt, value.ExpiresAt, now, requestTTL)
+}
+
+func validateRequestWindow(issuedAt, expiresAt string, now time.Time, maximumValidity time.Duration) error {
+	if maximumValidity > MaxGenericValidity {
+		return errors.New("configured validity window exceeds protocol maximum of 24 hours")
+	}
+	if maximumValidity == MaxGenericValidity {
+		return ValidateWindow(issuedAt, expiresAt, now)
+	}
+	return ValidateWindowWithin(issuedAt, expiresAt, now, maximumValidity)
 }
 
 func registrationUnsignedFrom(value Registration) registrationUnsigned {

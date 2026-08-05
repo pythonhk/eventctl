@@ -52,6 +52,16 @@ assert_contains() {
 	pass "$label"
 }
 
+assert_not_contains() {
+	local label=$1
+	local needle=$2
+	local path=$3
+	if grep -Fq -- "$needle" "$path"; then
+		fail "$label"
+	fi
+	pass "$label"
+}
+
 assert_before() {
 	local label=$1
 	local first=$2
@@ -410,9 +420,12 @@ test_finalization_boundaries() {
 test_release_workflow_boundaries() {
 	local workflow="$repo_dir/.github/workflows/release.yml"
 	local ci_workflow="$repo_dir/.github/workflows/ci.yml"
+	local installer="$repo_dir/scripts/release/install-shellcheck.sh"
+	local tool_versions="$repo_dir/scripts/release/tool-versions.env"
 	local build_job="$temp_dir/release-build.yml"
 	local native_job="$temp_dir/release-native-preflight.yml"
 	local publish_job="$temp_dir/release-publish.yml"
+	local published_record_job="$temp_dir/release-published-record.yml"
 	local published_job="$temp_dir/release-published-native.yml"
 	awk '$0 == "  build:" { copy = 1 }
        copy && $0 == "  native-preflight:" { exit }
@@ -425,6 +438,9 @@ test_release_workflow_boundaries() {
 	awk '$0 == "  publish:" { copy = 1 }
        copy && $0 == "  published-release-record:" { exit }
        copy { print }' "$workflow" >"$publish_job"
+	awk '$0 == "  published-release-record:" { copy = 1 }
+       copy && $0 == "  published-native:" { exit }
+       copy { print }' "$workflow" >"$published_record_job"
 
 	assert_contains "tag build reruns the exact full Go gate" \
 		'scripts/check.sh' "$build_job"
@@ -432,7 +448,26 @@ test_release_workflow_boundaries() {
 		'FUZZ_TIME: 10s' "$build_job"
 	assert_contains "tag build reruns the fuzz harness" \
 		'scripts/release/fuzz-smoke.sh' "$build_job"
-	assert_contains "tag build reruns ShellCheck" \
+	assert_contains "ShellCheck version is pinned in repository configuration" \
+		'SHELLCHECK_VERSION=0.11.0' "$tool_versions"
+	assert_contains "ShellCheck Linux archive checksum is pinned in repository configuration" \
+		'SHELLCHECK_LINUX_X86_64_ARCHIVE_SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198' \
+		"$tool_versions"
+	assert_contains "ShellCheck installer downloads only over HTTPS" \
+		"--proto '=https'" "$installer"
+	assert_before "ShellCheck installer verifies the archive before extracting it" \
+		"actual_archive_sha256=\$(sha256sum" \
+		"tar -xJf \"\$archive_path\"" \
+		"$installer"
+	assert_contains "ShellCheck installer reads back the installed version" \
+		"actual_version=\$(\"\$installed_binary\" --version" "$installer"
+	assert_contains "tag build installs pinned ShellCheck in runner temp" \
+		'scripts/release/install-shellcheck.sh' "$build_job"
+	assert_before "tag build installs ShellCheck before invoking it" \
+		'scripts/release/install-shellcheck.sh' \
+		"xargs -0 \"\$RUNNER_TEMP/eventctl-shellcheck-bin/shellcheck\"" \
+		"$build_job"
+	assert_not_contains "tag build does not invoke ambient ShellCheck" \
 		'xargs -0 shellcheck' "$build_job"
 	assert_contains "tag build reruns shfmt" \
 		'mvdan.cc/sh/v3/cmd/shfmt@' "$build_job"
@@ -448,12 +483,24 @@ test_release_workflow_boundaries() {
 		'${{ steps.metadata.outputs.version }}" release' "$build_job"
 	assert_contains "CI runs release-boundary regressions" \
 		'scripts/release/test-release-boundaries.sh' "$ci_workflow"
+	assert_contains "CI installs pinned ShellCheck in runner temp" \
+		'scripts/release/install-shellcheck.sh' "$ci_workflow"
+	assert_before "CI installs ShellCheck before invoking it" \
+		'scripts/release/install-shellcheck.sh' \
+		"xargs -0 \"\$RUNNER_TEMP/eventctl-shellcheck-bin/shellcheck\"" \
+		"$ci_workflow"
+	assert_not_contains "CI does not invoke ambient ShellCheck" \
+		'xargs -0 shellcheck' "$ci_workflow"
 	assert_contains "tag release reruns native source tests on every release runner" \
 		'go test -mod=readonly -count=1 ./...' "$native_job"
 	assert_contains "publication waits for native source and binary preflight" \
 		'native-preflight' "$publish_job"
 	assert_attestation_pairs "$publish_job"
 
+	assert_contains "published release-record verification can read attestations" \
+		'attestations: read' "$published_record_job"
+	assert_contains "published native verification can read attestations" \
+		'attestations: read' "$published_job"
 	assert_contains "published native checks depend on immutable record verification" \
 		'published-release-record' "$published_job"
 	# GitHub expressions are intentionally matched literally.

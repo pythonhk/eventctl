@@ -32,6 +32,11 @@ jobs:
         id: tools
         run: scripts/release/load-tool-versions.sh
 
+      - name: Install pinned ShellCheck
+        run: >-
+          scripts/release/install-shellcheck.sh
+          "$RUNNER_TEMP/eventctl-shellcheck-bin"
+
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -75,7 +80,9 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@${{ steps.tools.outputs.govulncheck }} ./...
 
       - name: ShellCheck
-        run: find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
+        run: >-
+          find scripts -type f -name '*.sh' -print0 |
+          xargs -0 "$RUNNER_TEMP/eventctl-shellcheck-bin/shellcheck"
 
       - name: Check Bash formatting
         run: go run mvdan.cc/sh/v3/cmd/shfmt@${{ steps.tools.outputs.shfmt }} -d -ci scripts

@@ -14,10 +14,14 @@ import (
 )
 
 const (
-	ProposalKind   = "team_proposal"
-	ProposalDomain = "team_proposal"
-	ConsentKind    = "team_consent"
-	ConsentDomain  = "team_consent"
+	ProposalKind                 = "team_proposal"
+	ProposalDomain               = "team_proposal"
+	ConsentKind                  = "team_consent"
+	ConsentDomain                = "team_consent"
+	MinProposalTTLSeconds uint64 = 300
+	MaxProposalTTLSeconds uint64 = 1_209_600
+	MinProposalTTL               = time.Duration(MinProposalTTLSeconds) * time.Second
+	MaxProposalTTL               = time.Duration(MaxProposalTTLSeconds) * time.Second
 )
 
 // Proposal is the authoritative flat team-proposal wire document.
@@ -83,7 +87,7 @@ type Consent struct {
 // internal field relationships without authenticating its signature, trusted
 // actor/config context, or current validity window.
 func (value Proposal) ValidateUntrustedStructure() error {
-	if err := validateProposal(value, time.Time{}); err != nil {
+	if err := validateProposal(value, time.Time{}, MaxProposalTTL); err != nil {
 		return err
 	}
 	if err := value.Signature.ValidateEncoding(); err != nil {
@@ -99,7 +103,7 @@ func (value Proposal) ValidateUntrustedStructure() error {
 // internal field relationships without authenticating its signature, trusted
 // actor/config context, proposal binding, or current validity window.
 func (value Consent) ValidateUntrustedStructure() error {
-	if err := validateConsent(value, time.Time{}); err != nil {
+	if err := validateConsent(value, time.Time{}, MaxProposalTTL); err != nil {
 		return err
 	}
 	if err := value.Signature.ValidateEncoding(); err != nil {
@@ -202,7 +206,7 @@ func NewProposal(params ProposalParams, private identity.Private) ([]byte, error
 		MemberActorIDs: members, BaseRepository: params.BaseRepository, ConfigDigest: params.ConfigDigest,
 		IssuedAt: formatTime(params.IssuedAt), ExpiresAt: formatTime(params.ExpiresAt),
 	}
-	if err := validateProposal(proposal, time.Time{}); err != nil {
+	if err := validateProposal(proposal, time.Time{}, MaxProposalTTL); err != nil {
 		return nil, err
 	}
 	proposal.Signature, err = envelope.Sign(ProposalDomain, unsignedProposal(proposal), pair.Private)
@@ -212,7 +216,9 @@ func NewProposal(params ProposalParams, private identity.Private) ([]byte, error
 	return canonical.Marshal(proposal)
 }
 
-func VerifyProposal(raw []byte, expected envelope.Expected, registry identity.Registry) (VerifiedProposal, error) {
+// VerifyProposal authenticates a proposal and enforces the proposal TTL from
+// the signed event config bound by expected.ConfigDigest.
+func VerifyProposal(raw []byte, expected envelope.Expected, proposalTTL time.Duration, registry identity.Registry) (VerifiedProposal, error) {
 	if len(raw) > envelope.MaxDocumentBytes {
 		return VerifiedProposal{}, errors.New("team proposal exceeds 1 MiB")
 	}
@@ -220,7 +226,7 @@ func VerifyProposal(raw []byte, expected envelope.Expected, registry identity.Re
 	if err := canonical.StrictUnmarshal(raw, &proposal); err != nil {
 		return VerifiedProposal{}, fmt.Errorf("decode team proposal: %w", err)
 	}
-	if err := validateProposal(proposal, expected.Now); err != nil {
+	if err := validateProposal(proposal, expected.Now, proposalTTL); err != nil {
 		return VerifiedProposal{}, err
 	}
 	if err := compareExpected(proposal.EventID, proposal.EventEpoch, proposal.BaseRepository.ID, proposal.ProposerActorID, proposal.ConfigDigest, proposal.KeyEpoch, proposal.KeyID, expected); err != nil {
@@ -256,7 +262,7 @@ func NewConsent(proposalRaw []byte, params ConsentParams, private identity.Priva
 	if err != nil {
 		return nil, err
 	}
-	proposal, err := VerifyProposal(proposalRaw, envelope.Expected{}, registry)
+	proposal, err := VerifyProposal(proposalRaw, envelope.Expected{}, MaxProposalTTL, registry)
 	if err != nil {
 		return nil, fmt.Errorf("verify proposal before consent: %w", err)
 	}
@@ -283,7 +289,7 @@ func NewConsent(proposalRaw []byte, params ConsentParams, private identity.Priva
 	if !ok || trusted != pair.Public {
 		return nil, errors.New("consent signing key does not match trusted registration")
 	}
-	if err := validateConsent(consent, time.Time{}); err != nil {
+	if err := validateConsent(consent, time.Time{}, MaxProposalTTL); err != nil {
 		return nil, err
 	}
 	consent.Signature, err = envelope.Sign(ConsentDomain, unsignedConsent(consent), pair.Private)
@@ -293,8 +299,10 @@ func NewConsent(proposalRaw []byte, params ConsentParams, private identity.Priva
 	return canonical.Marshal(consent)
 }
 
-func VerifyUnanimous(proposalRaw []byte, consentDocuments [][]byte, expected envelope.Expected, registry identity.Registry) (ActivationCandidate, error) {
-	proposal, err := VerifyProposal(proposalRaw, expected, registry)
+// VerifyUnanimous verifies the proposal and every member consent under the
+// proposal TTL from the signed event config.
+func VerifyUnanimous(proposalRaw []byte, consentDocuments [][]byte, expected envelope.Expected, proposalTTL time.Duration, registry identity.Registry) (ActivationCandidate, error) {
+	proposal, err := VerifyProposal(proposalRaw, expected, proposalTTL, registry)
 	if err != nil {
 		return ActivationCandidate{}, err
 	}
@@ -304,7 +312,7 @@ func VerifyUnanimous(proposalRaw []byte, consentDocuments [][]byte, expected env
 	seen := make(map[string]struct{}, len(consentDocuments))
 	fingerprints := make([]envelope.Fingerprint, 0, len(consentDocuments))
 	for index, raw := range consentDocuments {
-		consent, err := verifyConsent(raw, proposal, expected, registry)
+		consent, err := verifyConsent(raw, proposal, expected, proposalTTL, registry)
 		if err != nil {
 			return ActivationCandidate{}, fmt.Errorf("consent %d: %w", index, err)
 		}
@@ -327,16 +335,17 @@ func VerifyUnanimous(proposalRaw []byte, consentDocuments [][]byte, expected env
 }
 
 // VerifyConsent verifies one consent against one exact proposal and trusted
-// registry. Unanimity remains a protected-state aggregation concern.
-func VerifyConsent(proposalRaw, consentRaw []byte, expected envelope.Expected, registry identity.Registry) (VerifiedConsent, error) {
-	proposal, err := VerifyProposal(proposalRaw, expected, registry)
+// registry under the proposal TTL from the signed event config. Unanimity
+// remains a protected-state aggregation concern.
+func VerifyConsent(proposalRaw, consentRaw []byte, expected envelope.Expected, proposalTTL time.Duration, registry identity.Registry) (VerifiedConsent, error) {
+	proposal, err := VerifyProposal(proposalRaw, expected, proposalTTL, registry)
 	if err != nil {
 		return VerifiedConsent{}, err
 	}
-	return verifyConsent(consentRaw, proposal, expected, registry)
+	return verifyConsent(consentRaw, proposal, expected, proposalTTL, registry)
 }
 
-func verifyConsent(raw []byte, proposal VerifiedProposal, expected envelope.Expected, registry identity.Registry) (VerifiedConsent, error) {
+func verifyConsent(raw []byte, proposal VerifiedProposal, expected envelope.Expected, proposalTTL time.Duration, registry identity.Registry) (VerifiedConsent, error) {
 	if len(raw) > envelope.MaxDocumentBytes {
 		return VerifiedConsent{}, errors.New("team consent exceeds 1 MiB")
 	}
@@ -344,7 +353,7 @@ func verifyConsent(raw []byte, proposal VerifiedProposal, expected envelope.Expe
 	if err := canonical.StrictUnmarshal(raw, &consent); err != nil {
 		return VerifiedConsent{}, fmt.Errorf("decode team consent: %w", err)
 	}
-	if err := validateConsent(consent, expected.Now); err != nil {
+	if err := validateConsent(consent, expected.Now, proposalTTL); err != nil {
 		return VerifiedConsent{}, err
 	}
 	if consent.EventID != proposal.Document.EventID || consent.EventEpoch != proposal.Document.EventEpoch || consent.TeamID != proposal.Document.TeamID || consent.ProposalDigest != proposal.ProposalDigest || consent.BaseRepository != proposal.Document.BaseRepository || consent.ConfigDigest != proposal.Document.ConfigDigest {
@@ -374,7 +383,7 @@ func verifyConsent(raw []byte, proposal VerifiedProposal, expected envelope.Expe
 	return VerifiedConsent{Document: consent, Fingerprint: fingerprint}, nil
 }
 
-func validateProposal(value Proposal, now time.Time) error {
+func validateProposal(value Proposal, now time.Time, proposalTTL time.Duration) error {
 	if value.Kind != ProposalKind || value.Protocol != envelope.Protocol || value.ProtocolVersion != envelope.ProtocolVersion {
 		return errors.New("team proposal protocol discriminator is invalid")
 	}
@@ -410,10 +419,10 @@ func validateProposal(value Proposal, now time.Time) error {
 	if !contains(value.MemberActorIDs, value.ProposerActorID) {
 		return errors.New("proposer must be a member")
 	}
-	return envelope.ValidateWindow(value.IssuedAt, value.ExpiresAt, now)
+	return validateTeamWindow(value.IssuedAt, value.ExpiresAt, now, proposalTTL)
 }
 
-func validateConsent(value Consent, now time.Time) error {
+func validateConsent(value Consent, now time.Time, proposalTTL time.Duration) error {
 	if value.Kind != ConsentKind || value.Protocol != envelope.Protocol || value.ProtocolVersion != envelope.ProtocolVersion || value.Decision != "consent" {
 		return errors.New("team consent protocol discriminator is invalid")
 	}
@@ -435,7 +444,14 @@ func validateConsent(value Consent, now time.Time) error {
 	if err := envelope.ValidateRepository(value.BaseRepository); err != nil {
 		return err
 	}
-	return envelope.ValidateWindow(value.IssuedAt, value.ExpiresAt, now)
+	return validateTeamWindow(value.IssuedAt, value.ExpiresAt, now, proposalTTL)
+}
+
+func validateTeamWindow(issuedAt, expiresAt string, now time.Time, proposalTTL time.Duration) error {
+	if proposalTTL < MinProposalTTL || proposalTTL > MaxProposalTTL || proposalTTL%time.Second != 0 {
+		return fmt.Errorf("team proposal TTL must be %d to %d whole seconds", MinProposalTTLSeconds, MaxProposalTTLSeconds)
+	}
+	return envelope.ValidateWindowWithin(issuedAt, expiresAt, now, proposalTTL)
 }
 
 func unsignedProposal(v Proposal) proposalUnsigned {
