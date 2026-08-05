@@ -30,7 +30,7 @@ type CommittedClaim struct {
 	RequestKind              string               `json:"request_kind"`
 	ReplayKey                string               `json:"replay_key"`
 	RequestDigest            string               `json:"request_digest"`
-	RequestDocumentDigest    string               `json:"request_document_digest"`
+	RequestDocumentDigest    *string              `json:"request_document_digest"`
 	ActorID                  string               `json:"actor_id"`
 	TeamID                   *string              `json:"team_id"`
 	AttemptID                *string              `json:"attempt_id"`
@@ -147,6 +147,7 @@ func (claim CommittedClaim) Validate() error {
 		"team.consent":         "team_consent",
 		"submission.reserve":   "submission_envelope",
 		"submission.finalize":  "scorer_result",
+		CancellationOperation:  CancellationKind,
 	}
 	if operationKinds[claim.Operation] != claim.RequestKind {
 		return errors.New("receipt claim operation/request_kind binding is invalid")

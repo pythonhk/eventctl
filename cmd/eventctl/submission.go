@@ -24,7 +24,7 @@ import (
 
 func runSubmission(args []string, stderr io.Writer) (any, error) {
 	if len(args) == 0 {
-		return nil, usageError("usage: eventctl submission pack|inspect|verify|prepare|verify-request|decrypt-verify")
+		return nil, usageError("usage: eventctl submission pack|inspect|verify|prepare|authenticate-request|verify-request|decrypt-verify")
 	}
 	switch args[0] {
 	case "pack":
@@ -35,12 +35,14 @@ func runSubmission(args []string, stderr io.Writer) (any, error) {
 		return submissionVerifyPublic(args[1:])
 	case "prepare":
 		return submissionPrepare(args[1:], stderr)
+	case "authenticate-request":
+		return submissionAuthenticateRequest(args[1:])
 	case "verify-request":
 		return submissionVerifyRequest(args[1:])
 	case "decrypt-verify":
 		return submissionDecryptVerify(args[1:], stderr)
 	default:
-		return nil, usageError("usage: eventctl submission pack|inspect|verify|prepare|verify-request|decrypt-verify")
+		return nil, usageError("usage: eventctl submission pack|inspect|verify|prepare|authenticate-request|verify-request|decrypt-verify")
 	}
 }
 
@@ -266,6 +268,53 @@ func submissionPrepare(args []string, stderr io.Writer) (any, error) {
 	return requestSummary{*out, envelope.SubmissionKind, verified.Fingerprint.RequestDigest, docDigest, verified.Fingerprint.ReplayKey}, nil
 }
 
+// submissionAuthenticateRequest authenticates only the immutable signed
+// submission request and its trusted event, actor, source-time, and registry
+// bindings. It intentionally does not gate on the current lifecycle phase or
+// event enablement and does not fetch fresh PR metadata or the referenced
+// bundle. Intake adapters use this result solely to perform a protected replay
+// lookup before deciding whether the full mutable admission checks in
+// verify-request are required.
+func submissionAuthenticateRequest(args []string) (any, error) {
+	flags := newFlagSet("submission authenticate-request")
+	configPath := flags.String("config", "", "signed event config")
+	authority := flags.String("authority", "", "protected genesis")
+	stateMeta := flags.String("state-meta", "", "protected current state metadata")
+	registryPath := flags.String("registry", "", "trusted identity registry")
+	requestPath := flags.String("request", "", "signed submission request")
+	actorID := flags.String("expect-actor-id", "", "trusted workflow actor ID")
+	sourceTimeText := flags.String("source-time", "", "trusted immutable GitHub source creation time")
+	out := flags.String("out", "", "normalized authenticated request output")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *configPath == "" || *authority == "" || *stateMeta == "" || *registryPath == "" || *requestPath == "" || *actorID == "" || *sourceTimeText == "" || *out == "" {
+		return nil, usageError("usage: eventctl submission authenticate-request --config PATH --authority PATH --state-meta PATH --registry PATH --request PATH --expect-actor-id ID --source-time RFC3339 --out PATH")
+	}
+	sourceTime, err := parseTrustedSourceTime(*sourceTimeText)
+	if err != nil {
+		return nil, invalidError("validate trusted source time", err)
+	}
+	event, digest, _, err := loadTrustedContext(*configPath, *authority, *stateMeta, sourceTime)
+	if err != nil {
+		return nil, verificationError("verify event trust context", err)
+	}
+	registry, err := loadRegistry(*registryPath)
+	if err != nil {
+		return nil, verificationError("load identity registry", err)
+	}
+	requestRaw, err := readBounded(*requestPath, envelope.MaxDocumentBytes)
+	if err != nil {
+		return nil, ioError("read submission request", err)
+	}
+	verified, docDigest, err := verifySubmissionAuthenticity(event, digest, *actorID, sourceTime, registry, requestRaw)
+	if err != nil {
+		return nil, verificationError("authenticate submission request", err)
+	}
+	normalized := normalizedRequest{"verified", envelope.SubmissionKind, verified.Fingerprint.RequestDigest, docDigest, verified.Fingerprint.ReplayKey, verified.Document}
+	if err := writeCanonical(*out, normalized, 0o644); err != nil {
+		return nil, ioError("write authenticated submission", err)
+	}
+	return requestSummary{*out, envelope.SubmissionKind, verified.Fingerprint.RequestDigest, docDigest, verified.Fingerprint.ReplayKey}, nil
+}
+
 func submissionVerifyRequest(args []string) (any, error) {
 	flags := newFlagSet("submission verify-request")
 	configPath := flags.String("config", "", "signed event config")
@@ -300,8 +349,7 @@ func submissionVerifyRequest(args []string) (any, error) {
 	if err != nil {
 		return nil, ioError("read submission request", err)
 	}
-	envelopeTTL := time.Duration(event.Submissions.EnvelopeTTLSeconds) * time.Second
-	verified, err := envelope.VerifySubmission(requestRaw, envelope.Expected{EventID: event.EventID, EventEpoch: event.EventEpoch, RepositoryID: event.BaseRepository.ID, ActorID: *actorID, ConfigDigest: digest, Now: sourceTime}, envelopeTTL, registry)
+	verified, docDigest, err := verifySubmissionAuthenticity(event, digest, *actorID, sourceTime, registry, requestRaw)
 	if err != nil {
 		return nil, verificationError("verify submission request", err)
 	}
@@ -330,12 +378,28 @@ func submissionVerifyRequest(args []string) (any, error) {
 	if err := compareConfiguredRecipients(inspection.Envelope, event); err != nil {
 		return nil, verificationError("bundle recipient policy mismatch", err)
 	}
-	docDigest, _ := envelope.DocumentDigest(verified.Document)
 	normalized := normalizedRequest{"verified", envelope.SubmissionKind, verified.Fingerprint.RequestDigest, docDigest, verified.Fingerprint.ReplayKey, verified.Document}
 	if err := writeCanonical(*out, normalized, 0o644); err != nil {
 		return nil, ioError("write verified submission", err)
 	}
 	return requestSummary{*out, envelope.SubmissionKind, verified.Fingerprint.RequestDigest, docDigest, verified.Fingerprint.ReplayKey}, nil
+}
+
+func verifySubmissionAuthenticity(event config.Event, configDigest, actorID string, sourceTime time.Time, registry identity.Registry, requestRaw []byte) (envelope.VerifiedSubmission, string, error) {
+	envelopeTTL := time.Duration(event.Submissions.EnvelopeTTLSeconds) * time.Second
+	verified, err := envelope.VerifySubmission(requestRaw, envelope.Expected{
+		EventID: event.EventID, EventEpoch: event.EventEpoch,
+		RepositoryID: event.BaseRepository.ID, ActorID: actorID,
+		ConfigDigest: configDigest, Now: sourceTime,
+	}, envelopeTTL, registry)
+	if err != nil {
+		return envelope.VerifiedSubmission{}, "", err
+	}
+	docDigest, err := envelope.DocumentDigest(verified.Document)
+	if err != nil {
+		return envelope.VerifiedSubmission{}, "", err
+	}
+	return verified, docDigest, nil
 }
 
 func submissionDecryptVerify(args []string, stderr io.Writer) (any, error) {
@@ -426,7 +490,7 @@ func submissionDecryptVerify(args []string, stderr io.Writer) (any, error) {
 		return nil, err
 	}
 	acceptance := verifiedAcceptance.Document
-	if acceptance.RequestKind != envelope.SubmissionKind || acceptance.Outcome != "accepted" || !acceptance.QuotaCharged || acceptance.ReasonCode != nil || acceptance.OperationID != verifiedRequest.Document.RequestID || acceptance.ReplayKey != verifiedRequest.Fingerprint.ReplayKey || acceptance.RequestDigest != verifiedRequest.Fingerprint.RequestDigest || acceptance.RequestDocumentDigest != requestDocumentDigest || acceptance.ActorID != verifiedRequest.Document.ActorID || acceptance.TeamID == nil || *acceptance.TeamID != verifiedRequest.Document.TeamID || acceptance.AttemptID == nil || *acceptance.AttemptID != verifiedRequest.Document.AttemptID {
+	if acceptance.RequestKind != envelope.SubmissionKind || acceptance.Outcome != "accepted" || !acceptance.QuotaCharged || acceptance.ReasonCode != nil || acceptance.OperationID != verifiedRequest.Document.RequestID || acceptance.ReplayKey != verifiedRequest.Fingerprint.ReplayKey || acceptance.RequestDigest != verifiedRequest.Fingerprint.RequestDigest || acceptance.RequestDocumentDigest == nil || *acceptance.RequestDocumentDigest != requestDocumentDigest || acceptance.ActorID != verifiedRequest.Document.ActorID || acceptance.TeamID == nil || *acceptance.TeamID != verifiedRequest.Document.TeamID || acceptance.AttemptID == nil || *acceptance.AttemptID != verifiedRequest.Document.AttemptID {
 		return nil, verificationError("accepted receipt does not bind the exact submission reservation", nil)
 	}
 	if err := acceptance.ValidateSourceWindow(verifiedRequest.Document.IssuedAt, verifiedRequest.Document.ExpiresAt); err != nil {

@@ -41,7 +41,7 @@ eventctl key generate|show|backup
 eventctl recipient generate|show
 eventctl identity register|verify
 eventctl team propose|consent|verify
-eventctl submission pack|inspect|verify|prepare|verify-request|decrypt-verify
+eventctl submission pack|inspect|verify|prepare|authenticate-request|verify-request|decrypt-verify
 eventctl replay classify
 eventctl receipt sign|verify
 eventctl scorer validate-request|sign-result|verify
@@ -58,6 +58,13 @@ commands additionally require a trusted GitHub source timestamp. Bootstrap
 config verification requires the signed organizer-root delegation and every
 explicit root public key. Run a command with missing arguments to receive its
 exact usage contract as structured JSON.
+
+`submission authenticate-request` verifies the signed request, actor,
+registered key, repository, event/config, validity-window, digest, and replay
+bindings without reading mutable pull-request metadata or the referenced
+bundle. It is a replay-lookup primitive, not submission admission: a request
+that is not already present in protected replay state must still pass
+`submission verify-request` against fresh PR metadata and the exact bundle.
 
 `eventctl help`, `eventctl --help`, and `eventctl -h` return successful
 machine-readable help in the same `pythonhk.eventctl/output/v1` response wrapper
