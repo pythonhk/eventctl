@@ -1,16 +1,18 @@
-// Package buildinfo exposes release metadata injected with -ldflags.
 package buildinfo
 
+const (
+	Protocol = "eventctl/v2"
+)
+
 var (
-	Version = "dev"
-	Commit  = "unknown"
-	Date    = "unknown"
+	Version = "0.2.0-dev"
+	Commit  = "dev"
 )
 
 type Info struct {
-	Version string `json:"version"`
-	Commit  string `json:"commit"`
-	Date    string `json:"date"`
+	Version  string `json:"version"`
+	Commit   string `json:"commit"`
+	Protocol string `json:"protocol"`
 }
 
-func Current() Info { return Info{Version: Version, Commit: Commit, Date: Date} }
+func Current() Info { return Info{Version, Commit, Protocol} }

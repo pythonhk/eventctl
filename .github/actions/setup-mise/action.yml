@@ -1,0 +1,18 @@
+name: Set up pinned mise
+description: Install the checksum-pinned mise binary allowed by this repository's Actions policy.
+
+runs:
+  using: composite
+  steps:
+    - name: Install mise
+      shell: bash
+      run: |
+        set -Eeuo pipefail
+        binary="$RUNNER_TEMP/mise"
+        curl --fail --location --retry 3 --output "$binary" \
+          https://github.com/jdx/mise/releases/download/v2026.6.14/mise-v2026.6.14-linux-x64
+        printf '%s  %s\n' \
+          96ae1ef7b00a6ebbbec23ba1016d6e722f5e904966272f621d15326429e90d53 \
+          "$binary" | sha256sum --check --status
+        chmod +x "$binary"
+        printf '%s\n' "$RUNNER_TEMP" >> "$GITHUB_PATH"

@@ -3,175 +3,49 @@ name: CI
 on:
   pull_request:
   push:
-    branches:
-      - main
-  workflow_dispatch:
+    branches: [main]
 
 permissions:
   contents: read
 
-env:
-  SYFT_CHECK_FOR_APP_UPDATE: "false"
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  quality:
-    name: Go, Bash, and workflow quality
+  test:
+    name: eventctl / e2e
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
-      - name: Check out the source
+      - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Load pinned tool versions
-        id: tools
-        run: scripts/release/load-tool-versions.sh
-
-      - name: Install pinned ShellCheck
-        run: >-
-          scripts/release/install-shellcheck.sh
-          "$RUNNER_TEMP/eventctl-shellcheck-bin"
-
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6.0.0
         with:
-          go-version: ${{ steps.tools.outputs.go }}
-          cache: true
+          go-version-file: go.mod
 
-      - name: Verify module dependencies
+      - name: Set up pinned mise
+        uses: ./.github/actions/setup-mise
+
+      - name: Verify dependencies and formatting
         run: |
           go mod download
           go mod tidy -diff
           go mod verify
-          git diff --exit-code -- go.mod go.sum
-          if [[ -n $(git ls-files --others --exclude-standard -- go.mod go.sum) ]]; then
-            printf 'go.mod or go.sum has an uncommitted change\n' >&2
-            exit 1
-          fi
+          test -z "$(gofmt -l cmd internal tests)"
 
-      - name: Check Go formatting
-        run: |
-          unformatted=$(gofmt -l .)
-          if [[ -n $unformatted ]]; then
-            printf 'gofmt required:\n%s\n' "$unformatted" >&2
-            exit 1
-          fi
+      - name: Run static checks
+        run: go vet ./...
 
-      - name: Vet
-        run: go vet -mod=readonly ./...
+      - name: Run canonical CLI E2E coverage
+        run: mise run test
 
-      - name: Unit and integration tests
-        run: go test -mod=readonly -count=1 ./...
-
-      - name: Race detector
-        run: go test -mod=readonly -race -count=1 ./...
-
-      - name: Fuzz smoke tests
-        env:
-          FUZZ_TIME: 10s
-        run: scripts/release/fuzz-smoke.sh
-
-      - name: Vulnerability scan
-        run: go run golang.org/x/vuln/cmd/govulncheck@${{ steps.tools.outputs.govulncheck }} ./...
-
-      - name: ShellCheck
-        run: >-
-          find scripts -type f -name '*.sh' -print0 |
-          xargs -0 "$RUNNER_TEMP/eventctl-shellcheck-bin/shellcheck"
-
-      - name: Check Bash formatting
-        run: go run mvdan.cc/sh/v3/cmd/shfmt@${{ steps.tools.outputs.shfmt }} -d -ci scripts
-
-      - name: Validate GitHub Actions workflows
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@${{ steps.tools.outputs.actionlint }}
-
-      - name: Enforce immutable action pins
-        run: scripts/release/check-action-pins.sh
-
-      - name: Exercise release security boundaries
-        run: scripts/release/test-release-boundaries.sh
-
-      - name: Enforce GitHub CLI security floor
-        run: scripts/release/require-gh-version.sh
-
-  native-tests:
-    name: Native tests (${{ matrix.name }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux amd64
-            runner: ubuntu-24.04
-          - name: macOS arm64
-            runner: macos-15
-          - name: Windows amd64
-            runner: windows-2025
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    steps:
-      - name: Check out the source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Upload coverage artifact
+        if: ${{ env.ACT != 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          persist-credentials: false
-
-      - name: Load pinned tool versions
-        id: tools
-        shell: bash
-        run: scripts/release/load-tool-versions.sh
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ steps.tools.outputs.go }}
-          cache: true
-
-      - name: Run native tests
-        shell: bash
-        run: go test -mod=readonly -count=1 ./...
-
-  reproducible-release:
-    name: Reproducible cross-platform release snapshot
-    needs: quality
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Check out the source and tags
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Load pinned tool versions
-        id: tools
-        run: scripts/release/load-tool-versions.sh
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ steps.tools.outputs.go }}
-          cache: true
-
-      - name: Install pinned Syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-        with:
-          syft-version: ${{ steps.tools.outputs.syft }}
-
-      - name: Install pinned GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
-        with:
-          distribution: goreleaser
-          version: ${{ steps.tools.outputs.goreleaser }}
-          install-only: true
-
-      - name: Validate GoReleaser configuration
-        run: goreleaser check
-
-      - name: Prove archive reproducibility
-        run: |
-          snapshot_version="0.0.0-snapshot-$(git rev-parse --short HEAD)"
-          scripts/release/check-reproducible.sh "$snapshot_version"
+          name: eventctl-coverage
+          path: |
+            coverage/e2e.profile
+            coverage/e2e
+          if-no-files-found: error

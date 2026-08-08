@@ -1,95 +1,104 @@
-# Architecture and trust model
+# eventctl architecture
 
-## Responsibilities
-
-`eventctl` is an offline cryptographic and serialization tool. It is responsible
-for:
-
-- generating and loading participant Ed25519 keys;
-- producing and verifying versioned, domain-separated signed envelopes;
-- canonicalizing protocol JSON deterministically;
-- assembling bounded file manifests;
-- signing plaintext submission manifests before encryption;
-- encrypting and decrypting submission bundles with the vetted Go `age`
-  implementation; and
-- rejecting malformed, ambiguous, truncated, oversized, or unsafe inputs.
-
-It is deliberately not responsible for GitHub authentication, repository
-mutation, workflow dispatch, quota decisions, team activation, scoring, or event
-lifecycle decisions. Those decisions require current server-side state.
-
-## Independent trust inputs
-
-Three checks are required and must not substitute for one another:
-
-1. **CLI release trust** verifies that the executable came from the expected
-   `pythonhk/eventctl` release workflow and matches the event's pinned version
-   and platform checksum.
-2. **Event configuration trust** verifies the event ID, numeric upstream
-   repository ID, protocol version, limits, recipient key and epoch, and the
-   one v1 configuration digest pinned in protected genesis. Genesis also pins
-   the root-verified delegation digest, authority, and validity window.
-3. **GitHub actor trust** compares the numeric actor ID in a verified envelope
-   with numeric IDs from the GitHub webhook and freshly fetched API metadata.
-
-A valid signature proves possession of a participant key. It does not prove
-that GitHub authenticated the expected actor, that an attempt is fresh, or that
-quota remains. Durable protected event state supplies those properties.
-
-## Protocol rules
-
-- Protocol versions are independent of CLI semantic versions.
-- Envelopes use fixed schemas and reject unknown fields.
-- IDs and digests are serialized unambiguously; GitHub database IDs are decimal
-  strings to avoid consumer integer-precision differences.
-- Signatures are domain separated by protocol and action kind.
-- Signing keys and encryption identities are never derived from one another.
-- Participant signing material is never accepted through command-line arguments
-  or environment variables.
-- Encryption is sign-then-encrypt. Important public routing hints are duplicated
-  inside the encrypted signed manifest and must match after decryption.
-- A parser must consume the authenticated encrypted stream through EOF before
-  reporting success.
-
-## Replay model
-
-The CLI creates random request and attempt identifiers, but replay protection is
-stateful and enforced by the event controller:
+`eventctl` is a local protocol tool, not an event platform. The repository
+controls GitHub transport, review, and state promotion; `eventctl` controls
+strict documents, signatures, age encryption, and verification.
 
 ```text
-(event_id, request_kind, request_id) -> request_digest and terminal result
+participant fork / organizer workflow
+                 │ files, trusted actor ID, immutable source time
+                 ▼
+            Cobra command layer
+                 │
+        ┌────────┴────────┐
+        ▼                 ▼
+  protocol v2        stream container
+  event + registry   signed header + age payload
 ```
 
-Actor, repository, epochs, key identity, and configuration remain covered by
-the request digest and must be verified against trusted context before this
-replay-key lookup.
+## Trust model
 
-- The same replay key with the same request digest returns the original result.
-- The same replay key with a different request digest is an idempotency
-  conflict.
-- The same content under a new attempt ID is an intentional new attempt.
-- A copied envelope fails when its signed actor, repository, event, action, team
-  generation, configuration digest, PR address, or sealed head SHA differs from
-  trusted GitHub and event state.
+The repository has two relevant branches:
 
-Timestamps and expiry windows limit stale requests but are not replay protection.
+```text
+main     public event binding, workflows, request history
+registry protected authoritative event state
+```
 
-## Submission transport
+`event/binding.json` from trusted `main` defines policy and derives an event
+reference. A participant-signed document carries that reference. The reviewed
+`registry/state.json` from `registry` contains the active identities, teams,
+and attempts. Both are command inputs; neither is fetched over the network by
+the CLI.
 
-The CLI prepares an encrypted artifact but does not call the result “submitted.”
-Submission occurs only when the GitHub controller authenticates the actor,
-resolves the upstream PR by base plus fork owner and branch, verifies the exact
-numeric fork repository and head SHA, and atomically reserves an attempt in
-protected state.
+There is deliberately no GitHub App, app private key, organizer PEM, GitHub
+token, or GitHub API client in the runtime. GitHub verifies who opened a pull
+request; the trusted workflow passes that numeric actor ID and GitHub-created
+timestamp to `eventctl`. The organizer promotes the resulting verified record
+through a normal reviewed registry PR.
 
-The PR and source branch are the address. The exact head SHA and payload digest
-are the tamper seal.
+## Protocol documents
 
-## Private-key handling
+All JSON documents are bounded, reject duplicate keys and unknown fields, and
+use concrete structures for stable signed bytes. Signatures are Ed25519 over:
 
-Key files are created outside the repository with restrictive permissions and
-exclusive writes. Passphrases are read from a terminal or
-`--passphrase-file` (`-` means standard input), never from a passphrase-valued
-argument or environment variable. Backups remain encrypted. Logs and JSON
-output must never contain private keys, passphrases, or decrypted submission
-bytes.
+```text
+eventctl:eventctl/v2:<operation>\0<stable unsigned JSON>
+```
+
+The protocol has four main public document types:
+
+- `identity-registration`: binds a GitHub actor ID to an Ed25519 public key,
+  age recipient public key, key epoch, event reference, and short request
+  window.
+- `team-proposal` and `team-consent`: bind the exact sorted member set and
+  their registry-pinned key epochs. All members must consent separately.
+- `submission`: binds a team, actor, attempt, payload/metadata digests, and
+  request window.
+- `stream-binding`: binds an encrypted result artifact to the event, team,
+  attempt, purpose, and trusted artifact ID.
+
+The protected registry is intentionally one normalized document, rather than
+separate identity, membership, and replay indexes. It validates:
+
+- event reference and lifecycle phase;
+- sorted active identities and their public keys;
+- sorted active teams, with no member active in two teams;
+- sorted attempts whose submitter belongs to the recorded team.
+
+`team verify` rejects a team ID or member already active in that registry.
+`submission verify` requires `submissions_open`, active membership with the
+same key epoch, and an unused attempt within the binding's quotas. The command
+does not write state—the reviewed registry PR is the durable state transition.
+
+## Key custody and stream crypto
+
+`key-gen` creates separate participant key material:
+
+```text
+Ed25519 private key      signs participant documents
+age hybrid private key   decrypts artifacts addressed to that participant
+```
+
+Both private files are age-scrypt encrypted with one local passphrase. The
+separate primitives are intentional: an Ed25519 key cannot be safely reused
+as an age encryption key.
+
+The stream container is:
+
+```text
+8-byte magic | 4-byte big-endian header length | JSON header | age ciphertext
+```
+
+The signed header covers the public stream binding, signer, sorted recipient
+key IDs, payload size, and SHA-256 digest. The payload is age-encrypted to all
+recipient public keys. `decverify` verifies the header before accepting a
+decrypted payload and creates its output exclusively.
+
+## Testing boundary
+
+The only test suite is `tests/e2e`. It builds the real CLI with
+`-cover -coverpkg=./...`, invokes it as a subprocess, and drives state through
+event binding, identity, team, submission, stream, malformed-file, replay, and
+quota scenarios. Every subprocess inherits `GOCOVERDIR`; `mise run test`
+merges the counters and requires 100.0% statement coverage.
