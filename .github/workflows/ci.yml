@@ -18,10 +18,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up mise
-        uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6.0.0
         with:
-          cache: false
+          go-version-file: go.mod
+
+      - name: Set up pinned mise
+        uses: ./.github/actions/setup-mise
 
       - name: Verify dependencies and formatting
         run: |
