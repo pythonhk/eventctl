@@ -1,8 +1,8 @@
 # Security policy
 
-`eventctl` handles participant signing keys, team attestations, and encrypted
-event byte streams. Please report vulnerabilities privately through the
-repository's GitHub Security tab.
+`eventctl` handles participant signing keys, event-bound attestations,
+protected-registry verification, and encrypted event byte streams. Please
+report vulnerabilities privately through the repository's GitHub Security tab.
 
 Include the affected version, command, platform, synthetic reproduction, and
 whether confidentiality, signature verification, actor/team binding, replay
@@ -15,12 +15,17 @@ plaintext submissions, GitHub tokens, or event secrets.
   possible, with user-only filesystem permissions.
 - Do not commit private keys, plaintext event logs, decrypted outputs, or
   passphrase files.
-- Verify the event binding and recipient documents through the organizer's
-  trusted channel before encrypting.
+- Verify the public event binding through trusted `main`, and consume registry
+  state only from its protected branch.
 - Treat decrypted participant data as untrusted input and execute it only in
   the event's isolated scoring boundary.
+- Treat GitHub actor and immutable request-creation time as repository inputs;
+  they are not claims a participant can sign for themselves.
 - The CLI does not authenticate GitHub requests, update protected state, or
-  replace repository-level replay and actor checks.
+  replace the organizer's reviewed registry transition. It verifies that the
+  supplied state enforces active membership, replay, and quota rules.
+- There is no GitHub App, PEM, GitHub token, or network client in normal
+  eventctl operation.
 
 Only the current protocol release is supported. Event repositories should pin
 the exact binary version and review protocol compatibility before upgrading.

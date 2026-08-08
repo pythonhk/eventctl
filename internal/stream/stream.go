@@ -13,13 +13,14 @@ import (
 
 	"filippo.io/age"
 	"github.com/pythonhk/eventctl/internal/protocol"
+	"github.com/samber/lo"
 )
 
 var magic = [8]byte{'E', 'V', 'T', 'C', 'T', 'L', 1, 0}
 
 type Header struct {
 	Protocol        string                 `json:"protocol"`
-	Binding         protocol.Binding       `json:"binding"`
+	Binding         protocol.StreamBinding `json:"binding"`
 	Signer          protocol.SigningPublic `json:"signer"`
 	RecipientKeyIDs []string               `json:"recipient_key_ids"`
 	PayloadSize     int64                  `json:"payload_size"`
@@ -33,7 +34,7 @@ type Result struct {
 	RecipientCount int    `json:"recipient_count"`
 }
 
-func SealFile(input, output string, binding protocol.Binding, signingKey protocol.SigningKey, recipients []protocol.RecipientPublic, identities []age.Recipient) (Result, error) {
+func SealFile(input, output string, binding protocol.StreamBinding, signingKey protocol.SigningKey, recipients []protocol.RecipientPublic, identities []age.Recipient) (Result, error) {
 	payload, err := protocol.ReadBytes(input)
 	if err != nil {
 		return Result{}, fmt.Errorf("read stream: %w", err)
@@ -48,23 +49,29 @@ func SealFile(input, output string, binding protocol.Binding, signingKey protoco
 	signature := protocol.Sign("stream.sigcrypt", unsigned, signingKey)
 	header := unsigned
 	header.Signature = signature
-	headerBytes, _ := json.Marshal(header)
+	headerBytes := lo.Must(json.Marshal(header))
 	var cipher bytes.Buffer
-	writer, _ := age.Encrypt(&cipher, identities...)
-	_, _ = writer.Write(payload)
-	_ = writer.Close()
-	container := bytes.NewBuffer(make([]byte, 0, len(magic)+4+len(headerBytes)+cipher.Len()))
-	container.Write(magic[:])
-	_ = binary.Write(container, binary.BigEndian, uint32(len(headerBytes)))
-	container.Write(headerBytes)
-	container.Write(cipher.Bytes())
-	if err := protocol.WriteExclusive(output, container.Bytes(), 0o600); err != nil {
+	writer, encryptErr := age.Encrypt(&cipher, identities...)
+	if encryptErr != nil {
+		return Result{}, fmt.Errorf("encrypt stream: %w", encryptErr)
+	}
+	// The authenticated writer targets bytes.Buffer, whose writes cannot fail.
+	lo.Must(writer.Write(payload))
+	lo.Must0(writer.Close())
+	container := make([]byte, 0, len(magic)+4+len(headerBytes)+cipher.Len())
+	container = append(container, magic[:]...)
+	headerLength := [4]byte{}
+	binary.BigEndian.PutUint32(headerLength[:], uint32(len(headerBytes)))
+	container = append(container, headerLength[:]...)
+	container = append(container, headerBytes...)
+	container = append(container, cipher.Bytes()...)
+	if err := protocol.WriteExclusive(output, container, 0o600); err != nil {
 		return Result{}, fmt.Errorf("write encrypted stream: %w", err)
 	}
 	return Result{int64(len(payload)), hex.EncodeToString(digest[:]), len(recipients)}, nil
 }
 
-func OpenFile(input, output string, expected protocol.Binding, signer protocol.SigningPublic, recipient protocol.RecipientKey) (Result, error) {
+func OpenFile(input, output string, expected protocol.StreamBinding, signer protocol.SigningPublic, recipient protocol.RecipientKey) (Result, error) {
 	data, err := protocol.ReadBytes(input)
 	if err != nil {
 		return Result{}, fmt.Errorf("read encrypted stream: %w", err)
@@ -82,7 +89,7 @@ func OpenFile(input, output string, expected protocol.Binding, signer protocol.S
 	if err := json.Unmarshal(data[start:end], &header); err != nil {
 		return Result{}, fmt.Errorf("decode stream header: %w", err)
 	}
-	if header.Protocol != protocol.Protocol || !protocol.BindingsEqual(header.Binding, expected) {
+	if header.Protocol != protocol.Protocol || header.Binding != expected {
 		return Result{}, errors.New("stream binding mismatch")
 	}
 	if err := protocol.Verify("stream.sigcrypt", Header{header.Protocol, header.Binding, header.Signer, header.RecipientKeyIDs, header.PayloadSize, header.PayloadSHA256, protocol.Signature{}}, header.Signature, signer); err != nil {

@@ -1,7 +1,11 @@
 package buildinfo
 
 const (
-	Version = "0.1.0"
+	Protocol = "eventctl/v2"
+)
+
+var (
+	Version = "0.2.0-dev"
 	Commit  = "dev"
 )
 
@@ -11,4 +15,4 @@ type Info struct {
 	Protocol string `json:"protocol"`
 }
 
-func Current() Info { return Info{Version, Commit, "eventctl/v1"} }
+func Current() Info { return Info{Version, Commit, Protocol} }
