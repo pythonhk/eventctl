@@ -16,6 +16,7 @@ description = "Run the instrumented CLI E2E suite and enforce 100% coverage"
 run = """
   rm -rf "$E2E_COVERAGE_DIR" "$E2E_COVERAGE_PROFILE" "$E2E_COVERAGE_HTML"
   mkdir -p "$E2E_COVERAGE_DIR"
+  go clean -testcache
   GOCOVERDIR="$PWD/$E2E_COVERAGE_DIR" go test ./tests/e2e -tags=e2e -v -p 1 -count=1 -timeout 10m
   go tool covdata textfmt -i="$PWD/$E2E_COVERAGE_DIR" -o "$PWD/$E2E_COVERAGE_PROFILE"
   report="$(go tool cover -func="$PWD/$E2E_COVERAGE_PROFILE")"

@@ -32,7 +32,7 @@ jobs:
           go mod download
           go mod tidy -diff
           go mod verify
-          test -z "$(gofmt -l cmd internal tests)"
+          test -z "$(gofmt -l cmd internal protocol tests)"
 
       - name: Run static checks
         run: go vet ./...

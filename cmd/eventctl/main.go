@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,15 +9,14 @@ import (
 	"os"
 	"runtime"
 	"strings"
-	"time"
 
 	"filippo.io/age"
 	"github.com/caarlos0/env/v11"
+	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 
 	"github.com/pythonhk/eventctl/internal/buildinfo"
-	"github.com/pythonhk/eventctl/internal/protocol"
-	"github.com/pythonhk/eventctl/internal/stream"
+	"github.com/pythonhk/eventctl/protocol"
 )
 
 type response struct {
@@ -27,21 +27,20 @@ type response struct {
 }
 
 type doctorEnvironment struct {
-	EventID    string `env:"EVENTCTL_EVENT_ID" envDefault:"unset"`
-	EventEpoch int    `env:"EVENTCTL_EVENT_EPOCH" envDefault:"1"`
+	EventID string `env:"EVENTCTL_EVENT_ID" envDefault:""`
 }
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
-func run(args []string, stdout, stderr io.Writer) int {
+func run(arguments []string, stdout, stderr io.Writer) int {
 	root := newRoot(stdout, stderr)
-	root.SetArgs(args)
+	root.SetArgs(arguments)
 	if err := root.Execute(); err != nil {
 		command := strings.TrimSpace(strings.TrimPrefix(root.CommandPath(), "eventctl"))
 		if command == "" {
 			command = "eventctl"
 		}
-		_ = writeResponse(stdout, response{OK: false, Command: command, Error: err.Error()})
+		writeResponse(stdout, response{OK: false, Command: command, Error: err.Error()})
 		return 1
 	}
 	return 0
@@ -50,13 +49,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 func newRoot(stdout, stderr io.Writer) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "eventctl",
-		Short:         "PythonHK event registration and byte-stream cryptography",
+		Short:         "portable event artifacts and encrypted feedback",
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
 	root.SetOut(stdout)
 	root.SetErr(stderr)
-	root.AddCommand(versionCommand(), doctorCommand(), keyGenCommand(), sigcryptCommand(), decverifyCommand(), identityCommand(), teamCommand(), submissionCommand())
+	root.AddCommand(versionCommand(), doctorCommand(), keyGenCommand(), teamCommand(), submissionCommand(), sigcryptCommand(), decverifyCommand())
 	return root
 }
 
@@ -67,477 +66,227 @@ func versionCommand() *cobra.Command {
 }
 
 func doctorCommand() *cobra.Command {
-	var eventPath, registryPath string
-	command := &cobra.Command{Use: "doctor", Short: "check local eventctl configuration and protocol algorithms", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
-		if eventPath != "" {
-			binding, err := protocol.ReadEventBinding(eventPath)
-			if err != nil {
+	return &cobra.Command{Use: "doctor", Short: "check local eventctl support", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
+		configuration := lo.Must(env.ParseAs[doctorEnvironment]())
+		if configuration.EventID != "" {
+			if err := protocol.ValidateEventID(configuration.EventID); err != nil {
 				return err
 			}
-			result := map[string]any{"protocol": protocol.Protocol, "event": binding.Reference(), "go": runtime.Version(), "algorithms": map[string]string{"signing": "Ed25519", "recipient": "age-hybrid-mlkem768-x25519"}}
-			if registryPath != "" {
-				registry, readErr := protocol.ReadRegistry(registryPath, binding)
-				if readErr != nil {
-					return readErr
-				}
-				result["registry"] = map[string]any{"revision": registry.Revision, "phase": registry.Phase, "enabled": registry.Enabled, "identities": len(registry.Identities), "teams": len(registry.Teams), "attempts": len(registry.Attempts)}
-			}
-			return emit(command, result)
 		}
-		if registryPath != "" {
-			return errors.New("--registry requires --event")
-		}
-		var configuration doctorEnvironment
-		if err := env.Parse(&configuration); err != nil {
-			return fmt.Errorf("parse environment: %w", err)
-		}
-		if configuration.EventEpoch < 1 {
-			return errors.New("EVENTCTL_EVENT_EPOCH must be positive")
-		}
-		return emit(command, map[string]any{"protocol": protocol.Protocol, "event_id": configuration.EventID, "event_epoch": configuration.EventEpoch, "go": runtime.Version(), "algorithms": map[string]string{"signing": "Ed25519", "recipient": "age-hybrid-mlkem768-x25519"}})
+		return emit(command, map[string]any{
+			"protocol": protocol.Version,
+			"event_id": configuration.EventID,
+			"go":       runtime.Version(),
+			"algorithms": map[string]string{
+				"signature":  "Ed25519",
+				"encryption": "age-hybrid-mlkem768-x25519",
+			},
+		})
 	}}
-	command.Flags().StringVar(&eventPath, "event", "", "public event binding JSON")
-	command.Flags().StringVar(&registryPath, "registry", "", "protected event registry JSON")
-	return command
 }
 
 func keyGenCommand() *cobra.Command {
-	var directory, passphraseFile string
-	command := &cobra.Command{Use: "key-gen", Short: "create signing and recipient key pairs", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
-		passphrase, err := readPassphrase(passphraseFile)
+	var output string
+	command := &cobra.Command{Use: "key-gen", Short: "create signing and encryption key pairs", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
+		paths, err := protocol.GenerateKeyDirectory(output)
 		if err != nil {
 			return err
 		}
-		value, err := protocol.GenerateKeyDirectory(directory, passphrase)
-		if err != nil {
-			return err
-		}
-		return emit(command, value)
+		return emit(command, paths)
 	}}
-	command.Flags().StringVar(&directory, "out", "", "key directory")
-	command.Flags().StringVar(&passphraseFile, "passphrase-file", "", "key passphrase file")
+	command.Flags().StringVar(&output, "out", "", "key directory")
 	require(command, "out")
 	return command
 }
 
-func sigcryptCommand() *cobra.Command {
-	var input, output, context, signingPath, passphraseFile string
-	var recipientPaths []string
-	command := &cobra.Command{Use: "sigcrypt", Short: "sign and encrypt one byte stream", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
-		binding, err := protocol.ReadStreamBinding(context)
+func teamCommand() *cobra.Command {
+	root := &cobra.Command{Use: "team", Short: "prepare one-off team onboarding artifacts"}
+	root.AddCommand(teamFormCommand(), teamKeyCommand())
+	return root
+}
+
+func teamFormCommand() *cobra.Command {
+	var eventID, teamName, githubID, signingPath, encryptionPath, output string
+	var members []string
+	command := &cobra.Command{Use: "form", Short: "form a peer team and generate its UUID", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
+		private, err := protocol.LoadSigningPrivate(signingPath)
 		if err != nil {
 			return err
 		}
-		passphrase, err := readPassphrase(passphraseFile)
+		public := publicPEM(private)
+		encryption, err := protocol.LoadEncryptionPublic(encryptionPath)
 		if err != nil {
 			return err
 		}
-		signingKey, err := protocol.LoadSigningPrivate(signingPath, passphrase)
+		manifest, err := protocol.NewFormation(eventID, githubID, teamName, public, encryption.Text, members)
 		if err != nil {
 			return err
 		}
-		recipients := make([]protocol.RecipientPublic, 0, len(recipientPaths))
-		identities := make([]age.Recipient, 0, len(recipientPaths))
-		seen := make(map[string]bool, len(recipientPaths))
-		for _, path := range recipientPaths {
-			recipient, loadErr := protocol.LoadRecipientPublic(path)
-			if loadErr != nil {
-				return loadErr
-			}
-			if seen[recipient.KeyID] {
-				continue
-			}
-			seen[recipient.KeyID] = true
-			recipients = append(recipients, recipient)
-			identities = append(identities, recipient.Recipient)
-		}
-		value, err := stream.SealFile(input, output, binding, signingKey, recipients, identities)
+		result, err := protocol.WriteArtifact(output, manifest, nil, private)
 		if err != nil {
 			return err
 		}
-		return emit(command, value)
+		return emit(command, result)
 	}}
-	command.Flags().StringVar(&input, "input", "", "input byte stream")
-	command.Flags().StringVar(&output, "output", "", "encrypted output")
-	command.Flags().StringVar(&context, "context", "", "stream binding JSON")
-	command.Flags().StringVar(&signingPath, "sig-private-key", "", "encrypted signing key")
-	command.Flags().StringVar(&passphraseFile, "passphrase-file", "", "signing key passphrase file")
-	command.Flags().StringArrayVar(&recipientPaths, "enc-public-key", nil, "recipient public key (repeatable)")
-	require(command, "input", "output", "context", "sig-private-key")
+	command.Flags().StringVar(&eventID, "event-id", "", "event repository slug")
+	command.Flags().StringVar(&teamName, "team-name", "", "free-form team name")
+	command.Flags().StringVar(&githubID, "github-id", "", "numeric GitHub account ID")
+	command.Flags().StringArrayVar(&members, "member", nil, "numeric GitHub member ID (repeatable)")
+	command.Flags().StringVar(&signingPath, "sig-priv-key", "", "Ed25519 private key")
+	command.Flags().StringVar(&encryptionPath, "enc-pub-key", "", "age recipient public key")
+	command.Flags().StringVar(&output, "out", "", "formation tar output")
+	require(command, "event-id", "team-name", "github-id", "sig-priv-key", "enc-pub-key", "out")
+	return command
+}
+
+func teamKeyCommand() *cobra.Command {
+	var formationPath, githubID, signingPath, encryptionPath, output string
+	command := &cobra.Command{Use: "key", Short: "prove one additional member key", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
+		formation, err := protocol.ReadArtifact(formationPath)
+		if err != nil {
+			return err
+		}
+		private, err := protocol.LoadSigningPrivate(signingPath)
+		if err != nil {
+			return err
+		}
+		public := publicPEM(private)
+		encryption, err := protocol.LoadEncryptionPublic(encryptionPath)
+		if err != nil {
+			return err
+		}
+		manifest, err := protocol.NewTeamKey(formation, githubID, public, encryption.Text)
+		if err != nil {
+			return err
+		}
+		result, err := protocol.WriteArtifact(output, manifest, nil, private)
+		if err != nil {
+			return err
+		}
+		return emit(command, result)
+	}}
+	command.Flags().StringVar(&formationPath, "formation", "", "formation tar")
+	command.Flags().StringVar(&githubID, "github-id", "", "numeric GitHub account ID")
+	command.Flags().StringVar(&signingPath, "sig-priv-key", "", "Ed25519 private key")
+	command.Flags().StringVar(&encryptionPath, "enc-pub-key", "", "age recipient public key")
+	command.Flags().StringVar(&output, "out", "", "key tar output")
+	require(command, "formation", "github-id", "sig-priv-key", "enc-pub-key", "out")
+	return command
+}
+
+func submissionCommand() *cobra.Command {
+	root := &cobra.Command{Use: "submission", Short: "prepare participant submissions"}
+	var eventID, githubID, teamID, signingPath, output string
+	var inputs []string
+	prepare := &cobra.Command{Use: "prepare", Short: "sign and tar a submission", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
+		private, err := protocol.LoadSigningPrivate(signingPath)
+		if err != nil {
+			return err
+		}
+		public := publicPEM(private)
+		manifest, err := protocol.NewSubmission(eventID, githubID, teamID, public)
+		if err != nil {
+			return err
+		}
+		result, err := protocol.WriteArtifact(output, manifest, inputs, private)
+		if err != nil {
+			return err
+		}
+		return emit(command, result)
+	}}
+	prepare.Flags().StringVar(&eventID, "event-id", "", "event repository slug")
+	prepare.Flags().StringVar(&githubID, "github-id", "", "numeric GitHub account ID")
+	prepare.Flags().StringVar(&teamID, "team-id", "", "team UUID")
+	prepare.Flags().StringArrayVar(&inputs, "input", nil, "submission input file (repeatable)")
+	prepare.Flags().StringVar(&signingPath, "sig-priv-key", "", "Ed25519 private key")
+	prepare.Flags().StringVar(&output, "out", "", "submission tar output")
+	require(prepare, "event-id", "github-id", "team-id", "sig-priv-key", "out")
+	root.AddCommand(prepare)
+	return root
+}
+
+func sigcryptCommand() *cobra.Command {
+	var signingPath, output string
+	var inputs, recipientPaths []string
+	command := &cobra.Command{Use: "sigcrypt", Short: "sign and encrypt tarred input files", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
+		private, err := protocol.LoadSigningPrivate(signingPath)
+		if err != nil {
+			return err
+		}
+		recipients, err := loadRecipients(recipientPaths)
+		if err != nil {
+			return err
+		}
+		result, err := protocol.SealFeedback(inputs, output, private, recipients)
+		if err != nil {
+			return err
+		}
+		return emit(command, result)
+	}}
+	command.Flags().StringArrayVar(&inputs, "input", nil, "input file (repeatable)")
+	command.Flags().StringVar(&output, "out", "", "encrypted tar output")
+	command.Flags().StringVar(&signingPath, "sig-priv-key", "", "Ed25519 private key")
+	command.Flags().StringArrayVar(&recipientPaths, "enc-pub-key", nil, "age recipient public key (repeatable)")
+	require(command, "out", "sig-priv-key")
 	return command
 }
 
 func decverifyCommand() *cobra.Command {
-	var input, output, context, signerPath, recipientPath, passphraseFile string
-	command := &cobra.Command{Use: "decverify", Short: "decrypt and verify one byte stream", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
-		binding, err := protocol.ReadStreamBinding(context)
+	var input, outputDirectory, signingPath, encryptionPath string
+	command := &cobra.Command{Use: "decverify", Short: "decrypt and verify encrypted feedback", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
+		public, err := protocol.LoadSigningPublic(signingPath)
 		if err != nil {
 			return err
 		}
-		signer, err := protocol.LoadSigningPublic(signerPath)
+		private, err := protocol.LoadEncryptionPrivate(encryptionPath)
 		if err != nil {
 			return err
 		}
-		passphrase, err := readPassphrase(passphraseFile)
+		result, err := protocol.OpenFeedback(input, outputDirectory, public, private)
 		if err != nil {
 			return err
 		}
-		recipient, err := protocol.LoadRecipientPrivate(recipientPath, passphrase)
-		if err != nil {
-			return err
-		}
-		value, err := stream.OpenFile(input, output, binding, signer, recipient)
-		if err != nil {
-			return err
-		}
-		return emit(command, value)
+		return emit(command, result)
 	}}
-	command.Flags().StringVar(&input, "input", "", "encrypted input")
-	command.Flags().StringVar(&output, "output", "", "verified plaintext output")
-	command.Flags().StringVar(&context, "context", "", "stream binding JSON")
-	command.Flags().StringVar(&signerPath, "ver-public-key", "", "signing public key")
-	command.Flags().StringVar(&recipientPath, "dec-private-key", "", "encrypted recipient key")
-	command.Flags().StringVar(&passphraseFile, "passphrase-file", "", "recipient key passphrase file")
-	require(command, "input", "output", "context", "ver-public-key", "dec-private-key")
+	command.Flags().StringVar(&input, "input", "", "encrypted feedback tar")
+	command.Flags().StringVar(&outputDirectory, "out-dir", "", "empty extraction directory")
+	command.Flags().StringVar(&signingPath, "sig-pub-key", "", "trusted Ed25519 public key")
+	command.Flags().StringVar(&encryptionPath, "enc-priv-key", "", "age private key")
+	require(command, "input", "out-dir", "sig-pub-key", "enc-priv-key")
 	return command
 }
 
-func identityCommand() *cobra.Command {
-	root := &cobra.Command{Use: "identity", Short: "register and verify participant identities"}
-	var eventPath, actorID, registrationID, signingPath, recipientPath, passphraseFile, output string
-	var keyEpoch int
-	register := &cobra.Command{Use: "register", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
-		binding, err := protocol.ReadEventBinding(eventPath)
-		if err != nil {
-			return err
-		}
-		passphrase, err := readPassphrase(passphraseFile)
-		if err != nil {
-			return err
-		}
-		key, err := protocol.LoadSigningPrivate(signingPath, passphrase)
-		if err != nil {
-			return err
-		}
-		recipient, err := protocol.LoadRecipientPublic(recipientPath)
-		if err != nil {
-			return err
-		}
-		value, err := protocol.RegisterIdentity(binding, actorID, keyEpoch, registrationID, key, recipient, now())
-		if err != nil {
-			return err
-		}
-		if err := protocol.WriteJSON(output, value); err != nil {
-			return err
-		}
-		return emit(command, map[string]string{"output": output, "actor_id": value.ActorID, "registration_id": value.RegistrationID})
-	}}
-	register.Flags().StringVar(&eventPath, "event", "", "public event binding JSON")
-	register.Flags().StringVar(&actorID, "actor-id", "", "numeric GitHub actor ID")
-	register.Flags().IntVar(&keyEpoch, "key-epoch", 1, "identity key epoch")
-	register.Flags().StringVar(&registrationID, "registration-id", "", "UUIDv4 registration ID (generated if omitted)")
-	register.Flags().StringVar(&signingPath, "sig-private-key", "", "encrypted signing key")
-	register.Flags().StringVar(&recipientPath, "recipient-public-key", "", "age recipient public key")
-	register.Flags().StringVar(&passphraseFile, "passphrase-file", "", "signing key passphrase file")
-	register.Flags().StringVar(&output, "output", "", "registration JSON")
-	require(register, "event", "actor-id", "sig-private-key", "recipient-public-key", "output")
-
-	var verifyEvent, verifyInput, verifyActor, verifySourceTime, verifyOutput string
-	verify := &cobra.Command{Use: "verify", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
-		binding, err := protocol.ReadEventBinding(verifyEvent)
-		if err != nil {
-			return err
-		}
-		var document protocol.IdentityRegistration
-		if err := protocol.ReadJSON(verifyInput, &document); err != nil {
-			return err
-		}
-		record, err := protocol.VerifyIdentity(document, binding, verifyActor, verifySourceTime)
-		if err != nil {
-			return err
-		}
-		if err := protocol.WriteJSON(verifyOutput, record); err != nil {
-			return err
-		}
-		return emit(command, map[string]string{"output": verifyOutput, "actor_id": record.ActorID, "registration_id": record.RegistrationID})
-	}}
-	verify.Flags().StringVar(&verifyEvent, "event", "", "public event binding JSON")
-	verify.Flags().StringVar(&verifyInput, "input", "", "registration JSON")
-	verify.Flags().StringVar(&verifyActor, "expect-actor-id", "", "trusted GitHub actor ID")
-	verify.Flags().StringVar(&verifySourceTime, "source-time", "", "trusted immutable source creation time")
-	verify.Flags().StringVar(&verifyOutput, "output", "", "verified identity record JSON")
-	require(verify, "event", "input", "expect-actor-id", "source-time", "output")
-	root.AddCommand(register, verify)
-	return root
+func publicPEM(private ed25519.PrivateKey) string {
+	return protocol.SigningPublicPEM(private.Public().(ed25519.PublicKey))
 }
 
-func teamCommand() *cobra.Command {
-	root := &cobra.Command{Use: "team", Short: "prepare, consent to, and verify team proposals"}
-	var eventPath, registryPath, teamID, actorID, signingPath, passphraseFile, output string
-	var members []string
-	propose := &cobra.Command{Use: "propose", Aliases: []string{"register"}, Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
-		binding, err := protocol.ReadEventBinding(eventPath)
-		if err != nil {
-			return err
-		}
-		registry, err := protocol.ReadRegistry(registryPath, binding)
-		if err != nil {
-			return err
-		}
-		passphrase, err := readPassphrase(passphraseFile)
-		if err != nil {
-			return err
-		}
-		key, err := protocol.LoadSigningPrivate(signingPath, passphrase)
-		if err != nil {
-			return err
-		}
-		proposal, err := protocol.ProposeTeam(binding, registry, teamID, actorID, members, key, now())
-		if err != nil {
-			return err
-		}
-		if err := protocol.WriteJSON(output, proposal); err != nil {
-			return err
-		}
-		return emit(command, map[string]string{"output": output, "team_id": proposal.TeamID})
-	}}
-	propose.Flags().StringVar(&eventPath, "event", "", "public event binding JSON")
-	propose.Flags().StringVar(&registryPath, "registry", "", "protected active identity registry JSON")
-	propose.Flags().StringVar(&teamID, "team-id", "", "UUIDv4 team ID (generated if omitted)")
-	propose.Flags().StringVar(&actorID, "actor-id", "", "numeric proposer GitHub actor ID")
-	propose.Flags().StringArrayVar(&members, "member", nil, "member actor ID (repeatable, including proposer)")
-	propose.Flags().StringVar(&signingPath, "sig-private-key", "", "encrypted signing key")
-	propose.Flags().StringVar(&passphraseFile, "passphrase-file", "", "signing key passphrase file")
-	propose.Flags().StringVar(&output, "output", "", "team proposal JSON")
-	require(propose, "event", "registry", "actor-id", "sig-private-key", "output")
-
-	var consentEvent, consentRegistry, proposalPath, consentActor, consentSigning, consentPassphrase, consentOutput string
-	consent := &cobra.Command{Use: "consent", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
-		binding, err := protocol.ReadEventBinding(consentEvent)
-		if err != nil {
-			return err
-		}
-		registry, err := protocol.ReadRegistry(consentRegistry, binding)
-		if err != nil {
-			return err
-		}
-		var proposal protocol.TeamProposal
-		if err := protocol.ReadJSON(proposalPath, &proposal); err != nil {
-			return err
-		}
-		passphrase, err := readPassphrase(consentPassphrase)
-		if err != nil {
-			return err
-		}
-		key, err := protocol.LoadSigningPrivate(consentSigning, passphrase)
-		if err != nil {
-			return err
-		}
-		value, err := protocol.ConsentTeam(binding, registry, proposal, consentActor, key, now())
-		if err != nil {
-			return err
-		}
-		if err := protocol.WriteJSON(consentOutput, value); err != nil {
-			return err
-		}
-		return emit(command, map[string]string{"output": consentOutput, "actor_id": value.ActorID})
-	}}
-	consent.Flags().StringVar(&consentEvent, "event", "", "public event binding JSON")
-	consent.Flags().StringVar(&consentRegistry, "registry", "", "protected active identity registry JSON")
-	consent.Flags().StringVar(&proposalPath, "proposal", "", "team proposal JSON")
-	consent.Flags().StringVar(&consentActor, "actor-id", "", "numeric member GitHub actor ID")
-	consent.Flags().StringVar(&consentSigning, "sig-private-key", "", "encrypted signing key")
-	consent.Flags().StringVar(&consentPassphrase, "passphrase-file", "", "signing key passphrase file")
-	consent.Flags().StringVar(&consentOutput, "output", "", "team consent JSON")
-	require(consent, "event", "registry", "proposal", "actor-id", "sig-private-key", "output")
-
-	var verifyEvent, verifyRegistry, verifyProposal, proposalSourceTime, verifyOutput string
-	var consentPaths, consentSourceTimes []string
-	verify := &cobra.Command{Use: "verify", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
-		binding, err := protocol.ReadEventBinding(verifyEvent)
-		if err != nil {
-			return err
-		}
-		registry, err := protocol.ReadRegistry(verifyRegistry, binding)
-		if err != nil {
-			return err
-		}
-		var proposal protocol.TeamProposal
-		if err := protocol.ReadJSON(verifyProposal, &proposal); err != nil {
-			return err
-		}
-		if len(consentPaths) == 0 {
-			return errors.New("at least one --consent is required")
-		}
-		consents := make([]protocol.TeamConsent, 0, len(consentPaths))
-		for _, path := range consentPaths {
-			var consent protocol.TeamConsent
-			if err := protocol.ReadJSON(path, &consent); err != nil {
-				return err
-			}
-			consents = append(consents, consent)
-		}
-		sourceTimes, err := parseActorTimes(consentSourceTimes)
-		if err != nil {
-			return err
-		}
-		value, err := protocol.VerifyTeam(binding, registry, proposal, proposalSourceTime, consents, sourceTimes)
-		if err != nil {
-			return err
-		}
-		if err := protocol.WriteJSON(verifyOutput, value); err != nil {
-			return err
-		}
-		return emit(command, map[string]string{"output": verifyOutput, "team_id": value.TeamID, "proposal_sha256": value.ProposalSHA256})
-	}}
-	verify.Flags().StringVar(&verifyEvent, "event", "", "public event binding JSON")
-	verify.Flags().StringVar(&verifyRegistry, "registry", "", "protected active identity registry JSON")
-	verify.Flags().StringVar(&verifyProposal, "proposal", "", "team proposal JSON")
-	verify.Flags().StringVar(&proposalSourceTime, "proposal-source-time", "", "trusted proposal pull-request creation time")
-	verify.Flags().StringArrayVar(&consentPaths, "consent", nil, "team consent JSON (repeatable)")
-	verify.Flags().StringArrayVar(&consentSourceTimes, "consent-source-time", nil, "actor_id=RFC3339 proof creation time (repeatable)")
-	verify.Flags().StringVar(&verifyOutput, "output", "", "verified team plan JSON")
-	require(verify, "event", "registry", "proposal", "proposal-source-time", "output")
-	root.AddCommand(propose, consent, verify)
-	return root
-}
-
-func submissionCommand() *cobra.Command {
-	root := &cobra.Command{Use: "submission", Short: "prepare and verify event-bound submissions"}
-	var eventPath, input, metadata, teamID, attemptID, actorID, signingPath, passphraseFile, output string
-	var keyEpoch int
-	prepare := &cobra.Command{Use: "prepare", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
-		binding, err := protocol.ReadEventBinding(eventPath)
-		if err != nil {
-			return err
-		}
-		payload, err := protocol.ReadBytes(input)
-		if err != nil {
-			return err
-		}
-		var metadataBytes []byte
-		if metadata != "" {
-			metadataBytes, err = protocol.ReadBytes(metadata)
-			if err != nil {
-				return err
-			}
-		}
-		passphrase, err := readPassphrase(passphraseFile)
-		if err != nil {
-			return err
-		}
-		key, err := protocol.LoadSigningPrivate(signingPath, passphrase)
-		if err != nil {
-			return err
-		}
-		value, err := protocol.PrepareSubmission(binding, teamID, attemptID, actorID, keyEpoch, payload, metadataBytes, key, now())
-		if err != nil {
-			return err
-		}
-		if err := protocol.WriteJSON(output, value); err != nil {
-			return err
-		}
-		return emit(command, map[string]string{"output": output, "attempt_id": value.AttemptID, "payload_sha256": value.PayloadSHA256})
-	}}
-	prepare.Flags().StringVar(&eventPath, "event", "", "public event binding JSON")
-	prepare.Flags().StringVar(&input, "input", "", "submission byte stream")
-	prepare.Flags().StringVar(&metadata, "metadata", "", "optional metadata JSON")
-	prepare.Flags().StringVar(&teamID, "team-id", "", "active UUIDv4 team ID")
-	prepare.Flags().StringVar(&attemptID, "attempt-id", "", "UUIDv4 attempt ID")
-	prepare.Flags().StringVar(&actorID, "actor-id", "", "numeric submitter GitHub actor ID")
-	prepare.Flags().IntVar(&keyEpoch, "key-epoch", 1, "identity key epoch")
-	prepare.Flags().StringVar(&signingPath, "sig-private-key", "", "encrypted signing key")
-	prepare.Flags().StringVar(&passphraseFile, "passphrase-file", "", "signing key passphrase file")
-	prepare.Flags().StringVar(&output, "output", "", "submission request JSON")
-	require(prepare, "event", "input", "team-id", "attempt-id", "actor-id", "sig-private-key", "output")
-
-	var verifyEvent, verifyRegistry, requestPath, bundlePath, verifyMetadata, verifyActor, verifySourceTime, verifyOutput string
-	verify := &cobra.Command{Use: "verify", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
-		binding, err := protocol.ReadEventBinding(verifyEvent)
-		if err != nil {
-			return err
-		}
-		registry, err := protocol.ReadRegistry(verifyRegistry, binding)
-		if err != nil {
-			return err
-		}
-		var document protocol.Submission
-		if err := protocol.ReadJSON(requestPath, &document); err != nil {
-			return err
-		}
-		bundle, err := protocol.ReadBytes(bundlePath)
-		if err != nil {
-			return err
-		}
-		var metadataBytes []byte
-		if verifyMetadata != "" {
-			metadataBytes, err = protocol.ReadBytes(verifyMetadata)
-			if err != nil {
-				return err
-			}
-		}
-		if err := protocol.VerifySubmission(document, binding, registry, verifyActor, verifySourceTime, bundle, metadataBytes); err != nil {
-			return err
-		}
-		if err := protocol.WriteJSON(verifyOutput, document); err != nil {
-			return err
-		}
-		return emit(command, map[string]string{"output": verifyOutput, "attempt_id": document.AttemptID, "team_id": document.TeamID})
-	}}
-	verify.Flags().StringVar(&verifyEvent, "event", "", "public event binding JSON")
-	verify.Flags().StringVar(&verifyRegistry, "registry", "", "protected active identity registry JSON")
-	verify.Flags().StringVar(&requestPath, "request", "", "submission request JSON")
-	verify.Flags().StringVar(&bundlePath, "bundle", "", "exact submitted bundle")
-	verify.Flags().StringVar(&verifyMetadata, "metadata", "", "optional exact metadata")
-	verify.Flags().StringVar(&verifyActor, "expect-actor-id", "", "trusted GitHub actor ID")
-	verify.Flags().StringVar(&verifySourceTime, "source-time", "", "trusted immutable source creation time")
-	verify.Flags().StringVar(&verifyOutput, "output", "", "verified submission request JSON")
-	require(verify, "event", "registry", "request", "bundle", "expect-actor-id", "source-time", "output")
-	root.AddCommand(prepare, verify)
-	return root
-}
-
-func parseActorTimes(values []string) (map[string]string, error) {
-	times := make(map[string]string, len(values))
-	for _, value := range values {
-		actorID, timestamp, found := strings.Cut(value, "=")
-		if !found || actorID == "" || timestamp == "" || times[actorID] != "" {
-			return nil, errors.New("consent source time must be unique actor_id=RFC3339")
-		}
-		times[actorID] = timestamp
+func loadRecipients(paths []string) ([]age.Recipient, error) {
+	if len(paths) == 0 {
+		return nil, errors.New("at least one --enc-pub-key is required")
 	}
-	return times, nil
+	loaded := make([]protocol.EncryptionPublic, 0, len(paths))
+	for _, file := range paths {
+		value, err := protocol.LoadEncryptionPublic(file)
+		if err != nil {
+			return nil, err
+		}
+		loaded = append(loaded, value)
+	}
+	unique := lo.UniqBy(loaded, func(value protocol.EncryptionPublic) string { return value.Text })
+	return lo.Map(unique, func(value protocol.EncryptionPublic, _ int) age.Recipient { return value.Recipient }), nil
+}
+
+func emit(command *cobra.Command, value any) error {
+	writeResponse(command.OutOrStdout(), response{OK: true, Command: strings.TrimSpace(strings.TrimPrefix(command.CommandPath(), "eventctl")), Result: value})
+	return nil
+}
+
+func writeResponse(writer io.Writer, value response) {
+	_, _ = fmt.Fprintln(writer, string(lo.Must(json.Marshal(value))))
 }
 
 func require(command *cobra.Command, names ...string) {
 	for _, name := range names {
-		_ = command.MarkFlagRequired(name)
+		lo.Must0(command.MarkFlagRequired(name))
 	}
-}
-
-func now() time.Time { return time.Now().UTC() }
-
-func readPassphrase(path string) (string, error) {
-	if path == "" {
-		return "", errors.New("--passphrase-file is required")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read passphrase: %w", err)
-	}
-	passphrase := strings.TrimSpace(string(data))
-	if passphrase == "" {
-		return "", errors.New("passphrase file is empty")
-	}
-	return passphrase, nil
-}
-
-func emit(command *cobra.Command, value any) error {
-	return writeResponse(command.OutOrStdout(), response{OK: true, Command: strings.TrimPrefix(command.CommandPath(), "eventctl "), Result: value})
-}
-
-func writeResponse(writer io.Writer, value response) error {
-	encoder := json.NewEncoder(writer)
-	encoder.SetEscapeHTML(false)
-	return encoder.Encode(value)
 }
