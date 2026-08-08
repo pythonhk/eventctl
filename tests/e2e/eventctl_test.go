@@ -141,6 +141,7 @@ func (s *eventSuite) TestVersionAndDoctor() {
 	s.success("doctor")
 	s.failureWithEnv(map[string]string{"EVENTCTL_EVENT_ID": "not-a-repository"}, "doctor")
 	s.failure("doctor", "--unexpected")
+	s.failure("completion")
 	s.raw(0, "--help")
 	s.raw(0, "team", "--help")
 }
