@@ -1,9 +1,7 @@
 * @alex-au-922 @DebugTsang @sammyfung
 
 /.github/ @alex-au-922 @DebugTsang @sammyfung
-/.goreleaser.yaml @alex-au-922 @DebugTsang @sammyfung
 /cmd/ @alex-au-922 @DebugTsang @sammyfung
 /internal/ @alex-au-922 @DebugTsang @sammyfung
-/scripts/release/ @alex-au-922 @DebugTsang @sammyfung
 /go.mod @alex-au-922 @DebugTsang @sammyfung
 /go.sum @alex-au-922 @DebugTsang @sammyfung

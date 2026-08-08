@@ -1,5 +1,5 @@
 /bin/
 /dist/
-/coverage.out
+/coverage/
 *.test
 .DS_Store

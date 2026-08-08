@@ -1,126 +1,146 @@
 # eventctl
 
-`eventctl` is the offline-first command-line companion for reusable PythonHK
-GitHub events. It creates participant signing keys, produces signed registration
-and team-consent messages, and packages submissions as authenticated encrypted
-bundles that are safe to commit to a public Git repository.
+`eventctl` is a small, offline-first CLI for reusable PythonHK event
+repositories. It keeps participant registration, team consent, submission
+attestation, and encrypted event byte streams on one stable protocol surface.
+The CLI does not hold GitHub credentials or mutate repositories.
 
-Event repositories consume a prebuilt, pinned `eventctl` release. They must not
-compile the CLI during an event workflow or download an unverified `latest`
-binary.
-
-## Security properties
-
-- GitHub's numeric account ID is the identity; usernames are display data.
-- Every signed action is bound to an event ID, numeric upstream repository ID,
-  actor ID, action kind, key epoch, configuration digest, and unique request ID.
-- Every team member signs the same immutable team proposal. Partial consent does
-  not activate a team.
-- A submission attempt is distinct from its content. Replaying the same attempt
-  is idempotent, while deliberately submitting the same content with a fresh
-  attempt ID is allowed by policy.
-- Confidential submissions are signed before encryption. Encryption does not
-  replace authentication, actor binding, or durable replay tracking.
-- V1 fixes the event and config epochs at `1`. Protected genesis pins the exact
-  config digest, delegated signing authority, and delegation validity window;
-  a derived event does not adopt an edited config after bootstrap.
-- The CLI does not hold GitHub credentials, push commits, open pull requests, or
-  mutate event state.
-
-## Command families
-
-The implemented v1 interface is organized around:
+## Commands
 
 ```text
-eventctl version --json
-eventctl help [COMMAND [SUBCOMMAND]]
-eventctl envelope classify --request PATH --out PATH
-eventctl config validate|digest|sign|verify|delegation-sign|delegation-verify
+eventctl version
 eventctl doctor
-eventctl key generate|show|backup
-eventctl recipient generate|show
-eventctl identity register|verify
-eventctl team propose|consent|verify
-eventctl submission pack|inspect|verify|prepare|authenticate-request|verify-request|decrypt-verify
-eventctl replay classify
-eventctl receipt sign|verify
-eventctl scorer validate-request|sign-result|verify
+eventctl key-gen --out DIR --passphrase-file PATH
+eventctl sigcrypt --input PATH --output PATH --context PATH \
+  --sig-private-key PATH --passphrase-file PATH \
+  --enc-public-key PATH [--enc-public-key PATH ...]
+eventctl decverify --input PATH --output PATH --context PATH \
+  --ver-public-key PATH --dec-private-key PATH --passphrase-file PATH
+eventctl identity register|verify ...
+eventctl team register|consent|verify ...
+eventctl submission prepare ...
 ```
 
-Artifact-producing commands require an explicit output path. Machine-readable
-output is written to standard output; diagnostics are written to standard
-error. Protocol versions are independent of CLI semantic versions, and the CLI
-fails closed on unsupported protocol majors.
+Every command emits one JSON response. Successful responses have `ok: true`;
+failures have `ok: false` and a non-empty `error`. Cobra owns the help and
+argument contract, while diagnostics remain on standard error.
 
-Runtime verification commands require the signed config, protected genesis,
-and protected current-state metadata from the same immutable state ref. Intake
-commands additionally require a trusted GitHub source timestamp. Bootstrap
-config verification requires the signed organizer-root delegation and every
-explicit root public key. Run a command with missing arguments to receive its
-exact usage contract as structured JSON.
-
-`submission authenticate-request` verifies the signed request, actor,
-registered key, repository, event/config, validity-window, digest, and replay
-bindings without reading mutable pull-request metadata or the referenced
-bundle. It is a replay-lookup primitive, not submission admission: a request
-that is not already present in protected replay state must still pass
-`submission verify-request` against fresh PR metadata and the exact bundle.
-
-`eventctl help`, `eventctl --help`, and `eventctl -h` return successful
-machine-readable help in the same `pythonhk.eventctl/output/v1` response wrapper
-as ordinary commands. Command-family and exact-command help are available as,
-for example, `eventctl submission --help`, `eventctl help submission`, and
-`eventctl submission pack --help`. To create the passphrase-protected hybrid
-identity used for submission encryption, start with:
+## One-time participant setup
 
 ```bash
-eventctl recipient generate \
-  --identity-out judge-recipient.age \
-  --recipient-out judge-recipient.txt
+eventctl key-gen \
+  --out participant-identity \
+  --passphrase-file passphrase.txt
 ```
 
-Private signing keys and hybrid recipient identities are passphrase-encrypted.
-Passphrases are read from a terminal or `--passphrase-file`; they are never
-accepted as command-line values. Submission decryption and extraction are
-Linux-only and require every recipient identity named by the accepted archived
-configuration.
+The setup writes four files:
 
-Request timing is strict: the trusted GitHub source creation time must be
-between the signed `issued_at` and `expires_at`, inclusive. Participant systems
-should have synchronized clocks; after a `request is not yet valid` error,
-correct the clock and generate a fresh request rather than editing timestamps.
+```text
+signing.private.age       encrypted Ed25519 signing key
+signing.public.json       Ed25519 verification document
+recipient.private.age     encrypted age hybrid decryption identity
+recipient.public.json     age hybrid recipient document
+```
 
-`eventctl envelope classify` is a reconciler routing primitive, not a security
-verifier. It accepts strict, bounded concrete v1 request JSON either directly
-or inside the exact one-key `{ "envelope": ... }` transport wrapper, and writes
-only `{status, trust, kind, request_id}` with `trust` fixed to `unverified`.
-The original request must still pass its normal signature, actor, repository,
-configuration, source-time, and lifecycle checks before any state effect.
+Signing and decryption keys are separate. The same setup passphrase protects
+both encrypted private files, but it is never accepted as a command-line
+value. The recipient algorithm is Filippo's age hybrid
+ML-KEM768/X25519 construction.
 
-## Build from source
+## Event binding and team consent
 
-Building from source is intended for CLI contributors, not event participants:
+The JSON passed to `--context` binds an operation to the event, event and key
+epochs, request and attempt IDs, actor, team proposal digest, base repository,
+configuration digest, and a strict issued/expiry window. The binding is signed
+as part of every identity, team, submission, and stream operation.
 
 ```bash
-go test ./...
-go build -o ./bin/eventctl ./cmd/eventctl
-./bin/eventctl version --json
+eventctl identity register \
+  --context binding.json --actor-id 100 \
+  --sig-private-key participant-identity/signing.private.age \
+  --passphrase-file passphrase.txt --output identity.json
+
+eventctl team register \
+  --context binding.json --team-id team-001 \
+  --member 200 --member 300 \
+  --sig-private-key organizer/signing.private.age \
+  --passphrase-file organizer-passphrase.txt --output team.json
+
+eventctl team consent \
+  --proposal team.json --actor-id 200 \
+  --sig-private-key member-200/signing.private.age \
+  --passphrase-file member-200-passphrase.txt --output consent-200.json
+
+eventctl team verify \
+  --proposal team.json --consent consent-200.json --consent consent-300.json
 ```
 
-Official releases contain platform archives, SHA-256 checksums, SPDX SBOMs, and
-build provenance. Event templates pin the expected version and per-platform
-checksum in reviewed configuration.
+Team verification succeeds only when every proposed actor has one valid,
+unique consent for the exact proposal digest.
 
-## Trust boundary
+## Signed and encrypted byte streams
 
-`eventctl` handles canonicalization, cryptography, schema checks, and encrypted
-bundle parsing. Bash in the event repository handles GitHub transport and calls
-the CLI through a narrow adapter. Privileged GitHub workflows must independently
-verify every participant envelope and must never execute participant-controlled
-content.
+`sigcrypt` takes one bounded file-like byte stream. It signs a header containing
+the binding, signer, sorted recipient set, payload size, and SHA-256 digest,
+then encrypts the payload to every declared age recipient. Any authorized team
+member can decrypt with their own private recipient identity.
 
-See the event template's protocol and security documentation for the complete
-state machine, replay rules, and workflow trust boundaries.
+```bash
+eventctl sigcrypt \
+  --input judge.log --output judge.log.eventctl --context binding.json \
+  --sig-private-key organizer/signing.private.age \
+  --passphrase-file organizer-passphrase.txt \
+  --enc-public-key member-200/recipient.public.json \
+  --enc-public-key member-300/recipient.public.json
+
+eventctl decverify \
+  --input judge.log.eventctl --output judge.log --context binding.json \
+  --ver-public-key organizer/signing.public.json \
+  --dec-private-key member-200/recipient.private.age \
+  --passphrase-file member-200-passphrase.txt
+```
+
+The operation is fail-closed: wrong event context, signer, recipient, key
+passphrase, ciphertext, header, digest, size, or output path is rejected. Files
+are bounded at 64 MiB and outputs are created exclusively, so an existing
+result is never silently overwritten.
+
+## Submission preparation
+
+```bash
+eventctl submission prepare \
+  --context binding.json --input exploit-package.zip \
+  --metadata submission-metadata.json \
+  --sig-private-key participant-identity/signing.private.age \
+  --passphrase-file passphrase.txt --output submission.json
+```
+
+The submission document records payload and optional metadata digests and is
+signed with the participant's signing key. Transport, GitHub pull requests,
+and protected event state stay outside this CLI.
+
+## Development and coverage
+
+The repository intentionally contains only the command layer, protocol, stream
+implementation, build metadata, and one public-interface E2E suite. The E2E
+suite builds an instrumented `eventctl` binary, invokes that binary as a real
+subprocess, and checks success and failure scenarios through JSON responses.
+
+```bash
+mise run format-code
+mise run test
+mise run coverage-html
+```
+
+`mise run test` is the only test entrypoint. It always builds and runs the
+instrumented CLI through the black-box E2E suite, converts the emitted
+`GOCOVERDIR` counters with `go tool covdata`, prints the function report, and
+enforces `total: (statements) 100.0%`. `mise run coverage-html` depends on that
+same test task and renders the fresh report as HTML. Generated files under
+`coverage/` are ignored.
+
+The requested Go stack is deliberately visible in `go.mod`: Cobra,
+`samber/lo`, `caarlos0/env/v11`, `filippo.io/age`, and Testify.
 
 ## License
 

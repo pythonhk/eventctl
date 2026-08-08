@@ -1,0 +1,30 @@
+[tools]
+go = "1.26"
+
+[env]
+COVERAGE_DIR = "coverage"
+E2E_COVERAGE_DIR = "{{ env.COVERAGE_DIR }}/e2e"
+E2E_COVERAGE_PROFILE = "{{ env.COVERAGE_DIR }}/e2e.profile"
+E2E_COVERAGE_HTML = "{{ env.COVERAGE_DIR }}/e2e.html"
+
+[tasks.format-code]
+description = "Format Go sources"
+run = "go fmt ./..."
+
+[tasks.test]
+description = "Run the instrumented CLI E2E suite and enforce 100% coverage"
+run = """
+  rm -rf "$E2E_COVERAGE_DIR" "$E2E_COVERAGE_PROFILE" "$E2E_COVERAGE_HTML"
+  mkdir -p "$E2E_COVERAGE_DIR"
+  GOCOVERDIR="$PWD/$E2E_COVERAGE_DIR" go test ./tests/e2e -tags=e2e -v -p 1 -count=1 -timeout 10m
+  go tool covdata textfmt -i="$PWD/$E2E_COVERAGE_DIR" -o "$PWD/$E2E_COVERAGE_PROFILE"
+  report="$(go tool cover -func="$PWD/$E2E_COVERAGE_PROFILE")"
+  printf '%s\n' "$report"
+  coverage="$(printf '%s\n' "$report" | awk '$1 == "total:" { print $3 }')"
+  test "$coverage" = "100.0%"
+"""
+
+[tasks.coverage-html]
+description = "Render the CLI E2E coverage report as HTML"
+depends = ["test"]
+run = 'go tool cover -html="$PWD/$E2E_COVERAGE_PROFILE" -o "$PWD/$E2E_COVERAGE_HTML"'
