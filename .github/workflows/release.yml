@@ -37,17 +37,36 @@ jobs:
         run: |
           version="${VERSION#v}"
           mkdir -p dist
+          lock=dist/eventctl.lock.json
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg version "$version" \
+            '{repository: $repository, version: $version, assets: {}}' > "$lock"
           for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
             os="${target%/*}"
             arch="${target#*/}"
             directory="dist/eventctl_${version}_${os}_${arch}"
+            asset="eventctl_${version}_${os}_${arch}.tar.gz"
+            archive="dist/$asset"
             mkdir -p "$directory"
             GOOS="$os" GOARCH="$arch" go build -trimpath \
               -ldflags "-s -w -X github.com/pythonhk/eventctl/internal/buildinfo.Version=${version} -X github.com/pythonhk/eventctl/internal/buildinfo.Commit=${COMMIT}" \
               -o "$directory/eventctl" ./cmd/eventctl
-            tar -C "$directory" -czf "dist/eventctl_${version}_${os}_${arch}.tar.gz" eventctl
+            binary_sha256=$(sha256sum "$directory/eventctl" | awk '{print $1}')
+            tar -C "$directory" -czf "$archive" eventctl
+            archive_sha256=$(sha256sum "$archive" | awk '{print $1}')
+            jq \
+              --arg target "$os-$arch" \
+              --arg name "$asset" \
+              --arg archive_sha256 "$archive_sha256" \
+              --arg binary_sha256 "$binary_sha256" \
+              '.assets[$target] = {name: $name, archive_sha256: $archive_sha256, binary_sha256: $binary_sha256}' \
+              "$lock" > "$lock.next"
+            mv "$lock.next" "$lock"
             rm -rf "$directory"
           done
+          jq -e -cS . "$lock" > "$lock.next"
+          mv "$lock.next" "$lock"
           sha256sum dist/*.tar.gz > dist/SHA256SUMS
 
       - name: Publish immutable GitHub release
