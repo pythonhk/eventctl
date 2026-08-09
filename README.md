@@ -1,211 +1,138 @@
 # eventctl
 
-`eventctl` is the small, offline CLI behind reusable PythonHK event
-repositories. It creates participant keys, signs event-bound registrations,
-team requests, and submissions, and encrypts result files for a team.
+`eventctl` is a small offline CLI for GitHub-native PythonHK events. It makes
+portable team and submission artifacts, and signs and encrypts participant
+feedback. It deliberately has no GitHub client, registry mutation, policy
+engine, GitHub App, PAT, shell runtime, or organizer private key.
 
-It has no GitHub App, PEM, GitHub token, network client, Git mutation, or
-organizer private key. The event repository supplies the trusted public event
-binding and its protected `registry` branch supplies the authoritative state.
+The repository workflow owns actor authentication, protected state, admission,
+and scoring. `eventctl` owns participant keys and the `eventctl/v3` artifact
+format.
 
 ## Commands
 
 ```text
 eventctl version
-eventctl doctor [--event BINDING --registry REGISTRY]
-eventctl key-gen --out DIR --passphrase-file PATH
+eventctl doctor
+eventctl key-gen --out DIR
 
-eventctl identity register|verify ...
-eventctl team propose|consent|verify ...
-eventctl submission prepare|verify ...
+eventctl team form --event-id ID --team-name NAME --github-id ID --member ID... \
+  --sig-priv-key PATH --enc-pub-key PATH --out formation.tar
+eventctl team key --formation formation.tar --github-id ID \
+  --sig-priv-key PATH --enc-pub-key PATH --out key.tar
 
-eventctl sigcrypt ...
-eventctl decverify ...
+eventctl submission prepare --event-id ID --github-id ID --team-id UUID \
+  --input PATH... --sig-priv-key PATH --out submission.tar
+
+eventctl sigcrypt --input PATH... --out feedback.tar \
+  --sig-priv-key PATH --enc-pub-key PATH...
+eventctl decverify --input feedback.tar --out-dir DIR \
+  --sig-pub-key PATH --enc-priv-key PATH
 ```
 
-Every command writes exactly one JSON response to standard output. A successful
-response has `ok: true`; a rejected request has `ok: false` and a non-empty
-`error`. The process exits nonzero for the latter.
+Every command writes one JSON response to standard output. A rejected command
+has `ok: false` and exits nonzero. `doctor` can additionally validate an
+optional `EVENTCTL_EVENT_ID=owner/repository` environment value.
 
-## The two-branch model
+## Keys
+
+`key-gen` creates independent key pairs with no passphrase wrapper:
 
 ```text
-main     public event binding, workflows, and merged participant requests
-registry protected authoritative identities, activated teams, and attempts
+DIR/
+├── signature/
+│   ├── key       Ed25519 PKCS#8 PEM private key (0600)
+│   └── key.pub   Ed25519 PKIX PEM public key
+└── encryption/
+    ├── key       age hybrid ML-KEM768/X25519 private identity (0600)
+    └── key.pub   age hybrid recipient public key
 ```
 
-Participants work from forks and open pull requests to `main`. The normal
-read-only workflow checks the GitHub actor and request shape. An organizer then
-uses `eventctl` with the immutable GitHub creation time and writes the accepted
-result through a reviewed PR to `registry`. No participant request changes
-state by itself.
+The signing key proves who made an artifact. The encryption key decrypts
+feedback. They are intentionally distinct.
 
-`event/binding.json` is public, reviewed policy. It includes the event and
-repository IDs, event epoch, validity window, terms digest, request TTLs, and
-team/attempt limits. Every signed document embeds its derived event reference,
-so it cannot be replayed into a different event, repository, or policy
-revision.
+## Team onboarding
 
-The single registry document is also event-bound:
-
-```json
-{
-  "v": 2,
-  "kind": "event-registry",
-  "event": { "event_id": "...", "event_epoch": 1, "repository_id": "...", "binding_sha256": "..." },
-  "revision": 0,
-  "phase": "formation_open",
-  "enabled": true,
-  "disabled_reason": "",
-  "identities": [],
-  "teams": [],
-  "attempts": []
-}
-```
-
-The valid phases are `draft`, `registration_open`, `formation_open`,
-`submissions_open`, and `closed`. `eventctl` requires `formation_open` for
-team work and `submissions_open` for admission. It rejects an enabled registry
-with a disabled reason, or a disabled registry without one.
-
-## One participant setup
-
-```bash
-eventctl key-gen \
-  --out participant-identity \
-  --passphrase-file passphrase.txt
-```
-
-This creates four files:
+GitHub IDs are numeric account IDs. `team form` generates a UUIDv4 team ID,
+prints it in its response, and requires its initiator to appear in the sorted
+`--member` set. Team names are free-form visible names.
 
 ```text
-signing.private.age       encrypted Ed25519 signing key
-signing.public.json       Ed25519 verification document
-recipient.private.age     encrypted age hybrid decryption identity
-recipient.public.json     age hybrid recipient document
+one person:     formation.tar
+two or more:    formation.tar + one key.tar from every other listed member
 ```
 
-The two key types remain separate: Ed25519 signs documents, while age hybrid
-ML-KEM768/X25519 decrypts team data. One passphrase protects both local private
-files for convenience; the passphrase is only read from a file.
+`formation.tar` self-proves the initiator's signing and encryption public
+keys. A solo formation is therefore sufficient for a trusted controller to
+activate that team. For a multi-member team, each additional person produces a
+`key.tar` tied to the formation tar's SHA-256 digest. There is no captain
+field, registry mutation, or GitHub integration in the CLI.
 
-## Registration and team formation
+## Artifacts
 
-Registration is self-signed, but it becomes active only when its verified
-record is reviewed into `registry.identities`. The `--source-time` supplied to
-verification must be a trusted immutable time, normally GitHub's pull-request
-creation time—not a participant commit timestamp.
+Public request artifacts are plain deterministic tar archives. Each contains a
+signed `manifest.json`; submission tars also contain sorted `files/<basename>`
+entries. The manifest binds the protocol, event slug, numeric actor ID, team
+UUID, generated attempt UUID when applicable, public signing key, and file
+digests.
 
-```bash
-eventctl identity register \
-  --event event/binding.json --actor-id 12345 \
-  --sig-private-key participant-identity/signing.private.age \
-  --recipient-public-key participant-identity/recipient.public.json \
-  --passphrase-file passphrase.txt --output registration.json
+`sigcrypt` creates `feedback.tar`, an outer tar with exactly:
 
-eventctl identity verify \
-  --event event/binding.json --input registration.json \
-  --expect-actor-id 12345 --source-time 2026-08-08T12:00:00Z \
-  --output identity-record.json
+```text
+manifest.json
+payload.age
 ```
 
-An active member proposes a sorted team from the protected registry. Every
-listed member, including the proposer, separately signs their consent. The
-verifier resolves every signing and recipient key from the active registry;
-keys claimed only in the request are never trusted.
+The manifest is signed with Ed25519. `payload.age` is one age-encrypted inner
+tar and can be decrypted by any listed recipient key. Age encryption is
+intentionally randomized; the surrounding tar layout and manifest encoding are
+canonical. `decverify` verifies the trusted signer before safely extracting to
+an initially empty directory.
 
-```bash
-eventctl team propose \
-  --event event/binding.json --registry registry/state.json \
-  --actor-id 12345 --member 12345 --member 67890 \
-  --sig-private-key participant-identity/signing.private.age \
-  --passphrase-file passphrase.txt --output proposal.json
+## Repository contract
 
-eventctl team consent \
-  --event event/binding.json --registry registry/state.json \
-  --proposal proposal.json --actor-id 67890 \
-  --sig-private-key teammate-identity/signing.private.age \
-  --passphrase-file teammate-passphrase.txt --output consent.json
+The reusable starter uses these branch roles:
 
-eventctl team verify \
-  --event event/binding.json --registry registry/state.json \
-  --proposal proposal.json --proposal-source-time 2026-08-08T12:00:00Z \
-  --consent captain-consent.json --consent consent.json \
-  --consent-source-time 12345=2026-08-08T12:01:00Z \
-  --consent-source-time 67890=2026-08-08T12:02:00Z \
-  --output verified-team.json
+```text
+main         participant-facing material and workflows
+registry     protected trusted team state
+leaderboard  derived public scores
 ```
 
-The organizer records the verifier's team ID, proposal digest, and members as
-one `registry.teams` entry. The registry prevents another active team from
-reusing that team ID or any member.
+The trusted controller stores only this team state on `registry`:
 
-## Submission admission
-
-Participants prepare an event-bound, signed request alongside the exact
-submission file. `prepare` has no state effect; `verify` is the admission
-operation used from the protected registry workflow.
-
-```bash
-eventctl submission prepare \
-  --event event/binding.json --input exploit-package.zip \
-  --metadata metadata.json --team-id TEAM_UUID --attempt-id ATTEMPT_UUID \
-  --actor-id 12345 --sig-private-key participant-identity/signing.private.age \
-  --passphrase-file passphrase.txt --output submission.json
-
-eventctl submission verify \
-  --event event/binding.json --registry registry/state.json \
-  --request submission.json --bundle exploit-package.zip --metadata metadata.json \
-  --expect-actor-id 12345 --source-time 2026-08-08T12:10:00Z \
-  --output verified-submission.json
+```text
+teams/<uuid>/
+  team.json
+  state.json
+  <github-id>.sig.pub
+  <github-id>.enc.pub
 ```
 
-Verification requires an active team, an active member with the same key
-epoch, an unused attempt ID, and remaining per-team and total quotas. The
-reviewed registry update records the attempt; it is the durable replay guard.
-
-## Encrypted result artifacts
-
-`sigcrypt` signs a bounded byte stream and encrypts it to one or more team
-recipient public keys. A GitHub Actions judge can upload the ciphertext as an
-artifact. Any intended team member can download it and run `decverify` using
-their own recipient private key.
-
-```bash
-eventctl sigcrypt \
-  --input judge.log --output judge.log.eventctl --context stream-binding.json \
-  --sig-private-key organizer/signing.private.age \
-  --passphrase-file organizer-passphrase.txt \
-  --enc-public-key captain/recipient.public.json \
-  --enc-public-key teammate/recipient.public.json
-
-eventctl decverify \
-  --input judge.log.eventctl --output judge.log --context stream-binding.json \
-  --ver-public-key organizer/signing.public.json \
-  --dec-private-key teammate/recipient.private.age \
-  --passphrase-file teammate-passphrase.txt
-```
-
-The stream header signs the event reference, stream purpose, signer, sorted
-recipient key IDs, payload size, and SHA-256 digest. Input files are capped at
-64 MiB and outputs are exclusive creates, so an existing file is never
-overwritten silently.
+`team.json` is immutable: ID, free-form name, and sorted numeric members.
+`state.json` holds mutable operational provenance, attempts, status, and score
+state. An organizer can set a team status to `disabled`; `eventctl` never makes
+that decision.
 
 ## Development
 
-The repository has one test entrypoint:
+The sole test entry point is:
 
 ```bash
 mise run test
 ```
 
-It builds an instrumented `eventctl` binary and drives it as a real subprocess
-through the complete registration, team, submission, stream, error, replay,
-and quota lifecycle. It then merges `GOCOVERDIR` data and fails unless
-statement coverage is exactly 100.0%. There are no unit-test tasks.
+It compiles the CLI with coverage instrumentation and drives it only as a
+subprocess. The suite creates real keys and artifacts, including malformed tar
+fixtures and independently signed encrypted feedback, and requires exactly
+100.0% Go statement coverage. There are no unit-test tasks or tracked shell
+scripts.
 
-`mise run format-code` formats Go sources. CI runs the same `mise run test`
-entrypoint rather than a separate test command.
+The reusable workflow controller imports the public Go package:
+
+```text
+github.com/pythonhk/eventctl/protocol
+```
 
 ## License
 

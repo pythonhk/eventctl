@@ -1,11 +1,11 @@
 package buildinfo
 
 const (
-	Protocol = "eventctl/v2"
+	Protocol = "eventctl/v3"
 )
 
 var (
-	Version = "0.2.0-dev"
+	Version = "0.3.0-dev"
 	Commit  = "dev"
 )
 
