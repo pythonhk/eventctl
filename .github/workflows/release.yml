@@ -67,7 +67,7 @@ jobs:
           done
           jq -e -cS . "$lock" > "$lock.next"
           mv "$lock.next" "$lock"
-          sha256sum dist/*.tar.gz > dist/SHA256SUMS
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
 
       - name: Publish immutable GitHub release
         env:
