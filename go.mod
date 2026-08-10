@@ -4,6 +4,8 @@ go 1.26.0
 
 toolchain go1.26.5
 
+retract [v1.0.0, v1.0.1] // Superseded protocol line; use v0.3.1.
+
 require (
 	filippo.io/age v1.3.1
 	github.com/caarlos0/env/v11 v11.4.1
