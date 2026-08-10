@@ -2,7 +2,9 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
+      - "!v1.0.1" # Go retraction sentinel; it is not a CLI release.
 
 permissions:
   contents: write
